@@ -576,6 +576,31 @@ int LiSendExecServerCmd(uint8_t cmdId);
 // This method exists here for workaround client side wifi sleeps.
 int LiSendEmptyPayload();
 
+// Feature negotiation.
+//
+// Every Moonlight OS extension rides on this rather than inventing its own
+// handshake. Both ends advertise what they support once, immediately after the
+// control stream comes up, and then simply ask. Nothing may assume a feature is
+// present because the peer is "new enough": versions are a poor proxy for a
+// build that was compiled without something, and there is no reason to guess
+// when the peer will tell you.
+//
+// Identifiers are ours to allocate and are not GFE, Sunshine or Apollo values.
+// Never reuse a number for a different feature -- an old peer would agree to
+// something it has never heard of.
+#define ML_FEATURE_CLIPBOARD        0x0001 // Advertise-then-fetch clipboard
+#define ML_FEATURE_KEYBOARD_LAYOUT  0x0002 // Client tells the host its layout
+
+// The version of a feature the peer advertised, or 0 when it did not advertise
+// it at all -- so a plain truth test is the right way to ask whether a feature
+// may be used. Versions start at 1.
+//
+// This is only meaningful once the control stream is up, and it is answered
+// from what the peer actually sent, so it reports 0 before its advertisement
+// arrives. Features are negotiated before the stream is handed to the caller,
+// so any code that runs during a session sees the settled answer.
+uint16_t LiGetPeerFeatureVersion(uint16_t featureId);
+
 // This function queues a relative mouse move event to be sent to the remote server.
 int LiSendMouseMoveEvent(short deltaX, short deltaY);
 

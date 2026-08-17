@@ -61,6 +61,12 @@ extern uint32_t EncryptionFeaturesEnabled;
 #define CTRL_CHANNEL_PEN          0x04
 #define CTRL_CHANNEL_TOUCH        0x05
 #define CTRL_CHANNEL_UTF8         0x06
+// Feature negotiation and the extensions that ride on it. 0x07 was the gap
+// left between UTF8 and SERVERCTL, so this stays inside CTRL_CHANNEL_COUNT and
+// the ENet handshake is unchanged -- both ends already agree on the count.
+// Its own channel because ENet orders within a channel: a large clipboard
+// payload must not delay input, and input must not delay it.
+#define CTRL_CHANNEL_FEATURE      0x07
 #define CTRL_CHANNEL_SERVERCTL    0x08
 #define CTRL_CHANNEL_GAMEPAD_BASE 0x10 // 0x10 to 0x1F by controller index
 #define CTRL_CHANNEL_SENSOR_BASE  0x20 // 0x20 to 0x2F by controller index
@@ -117,6 +123,8 @@ char* getSdpPayloadForStreamConfig(int rtspClientVersion, int* length);
 
 int initializeControlStream(void);
 int startControlStream(void);
+int sendFeatureAdvertise(void);
+void resetPeerFeatures(void);
 int stopControlStream(void);
 void destroyControlStream(void);
 void connectionDetectedFrameLoss(uint32_t startFrame, uint32_t endFrame);

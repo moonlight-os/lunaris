@@ -143,6 +143,7 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_SET_CLIPBOARD 13
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 14
 #define IDX_DS_ADAPTIVE_TRIGGERS 15
+#define IDX_FEATURE_ADVERTISE 16
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -164,6 +165,7 @@ static const short packetTypesGen3[] = {
     -1,     // Set Clipboard (unused)
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
+    -1,     // Feature advertisement (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -182,6 +184,7 @@ static const short packetTypesGen4[] = {
     -1,     // Set Clipboard (unused)
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
+    -1,     // Feature advertisement (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -200,6 +203,7 @@ static const short packetTypesGen5[] = {
     -1,     // Set Clipboard (unused)
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
+    -1,     // Feature advertisement (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -218,6 +222,7 @@ static const short packetTypesGen7[] = {
     -1,     // Set Clipboard (unused)
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
+    -1,     // Feature advertisement (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -236,6 +241,7 @@ static const short packetTypesGen7Enc[] = {
     0x3001, // Set Clipboard (Apollo protocol extension)
     0x3002, // File transfer nonce request (Apollo protocol extension)
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
+    0x6000, // Feature advertisement (Moonlight OS protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -312,6 +318,10 @@ static const char* preconstructedPayloadsGen7Enc[] = {
 };
 
 static short* packetTypes;
+
+// Defined with the rest of the feature negotiation further down, but called
+// from the receive loop above it.
+static void handleFeatureAdvertise(char* payload, int payloadLength);
 static short* payloadLengths;
 static char**preconstructedPayloads;
 static bool supportsIdrFrameRequest;
@@ -322,6 +332,12 @@ static bool supportsIdrFrameRequest;
 // Initializes the control stream
 int initializeControlStream(void) {
     stopping = false;
+
+    // Nothing is known about this peer until it says so. Without this, a
+    // second session inherits the first host's features and would happily use
+    // one the new host has never heard of.
+    resetPeerFeatures();
+
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
@@ -1320,6 +1336,13 @@ static void controlReceiveThreadFunc(void* context) {
             if (needsAsyncCallback(ctlHdr->type)) {
                 queueAsyncCallback(ctlHdr, packetLength);
             }
+            // Handled here rather than on the async callback thread: this
+            // only writes a small table that the rest of the session reads,
+            // and doing it inline means the answer is settled before any
+            // feature code can ask.
+            else if (ctlHdr->type == packetTypes[IDX_FEATURE_ADVERTISE]) {
+                handleFeatureAdvertise((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
             else if (ctlHdr->type == packetTypes[IDX_TERMINATION]) {
                 BYTE_BUFFER bb;
 
@@ -1958,6 +1981,14 @@ int startControlStream(void) {
         return err;
     }
 
+    // Tell the host what this client supports, now that the control stream
+    // carries traffic. Failing to send is not fatal: every feature then reads
+    // as unsupported on both ends, which degrades the session rather than
+    // ending it.
+    if (!sendFeatureAdvertise()) {
+        Limelog("Failed to advertise client features; extensions will be unavailable\n");
+    }
+
     err = PltCreateThread("LossStats", lossStatsThreadFunc, NULL, &lossStatsThread);
     if (err != 0) {
         stopping = true;
@@ -2117,6 +2148,139 @@ int LiSendExecServerCmd(uint8_t cmdId) {
         sizeof(payload),
         payload,
         CTRL_CHANNEL_SERVERCTL,
+        ENET_PACKET_FLAG_RELIABLE,
+        false
+    );
+}
+
+// Feature negotiation.
+//
+// The wire format, deliberately dull so that adding a feature later is one
+// entry in a table and nothing else:
+//
+//   uint8   format version, currently 1
+//   uint8   reserved, must be zero
+//   uint16  count
+//   count x { uint16 featureId; uint16 featureVersion; }
+//
+// Little-endian throughout, matching the other extension messages. A peer that
+// does not understand 0x6000 at all simply never replies, which is
+// indistinguishable from one that supports nothing -- and that is the correct
+// reading of it.
+#define FEATURE_ADVERTISE_FORMAT_VERSION 1
+#define FEATURE_ADVERTISE_MAX_COUNT 64
+
+typedef struct _FEATURE_ENTRY {
+    uint16_t id;
+    uint16_t version;
+} FEATURE_ENTRY, *PFEATURE_ENTRY;
+
+// What the peer told us it can do. Written once from the control receive
+// thread before the caller is handed a running session, then only read.
+static FEATURE_ENTRY peerFeatures[FEATURE_ADVERTISE_MAX_COUNT];
+static uint16_t peerFeatureCount;
+
+// What we can do. Adding a feature means adding a line here and nothing else
+// on the sending side.
+static const FEATURE_ENTRY localFeatures[] = {
+    { ML_FEATURE_CLIPBOARD, 1 },
+    { ML_FEATURE_KEYBOARD_LAYOUT, 1 },
+};
+
+uint16_t LiGetPeerFeatureVersion(uint16_t featureId) {
+    int i;
+
+    for (i = 0; i < peerFeatureCount; i++) {
+        if (peerFeatures[i].id == featureId) {
+            return peerFeatures[i].version;
+        }
+    }
+
+    return 0;
+}
+
+void resetPeerFeatures(void) {
+    peerFeatureCount = 0;
+    memset(peerFeatures, 0, sizeof(peerFeatures));
+}
+
+// Read a peer advertisement. Hostile input: every length is checked against
+// what actually arrived rather than against what the header claims.
+static void handleFeatureAdvertise(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint8_t formatVersion;
+    uint8_t reserved;
+    uint16_t count;
+    int i;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+
+    if (!BbGet8(&bb, &formatVersion) || !BbGet8(&bb, &reserved) || !BbGet16(&bb, &count)) {
+        Limelog("Feature advertisement too short to read\n");
+        return;
+    }
+
+    // A newer peer may use a format we cannot parse. Ignoring the message
+    // leaves every feature reading as unsupported, which is the safe outcome:
+    // better to lose a feature than to misparse one.
+    if (formatVersion != FEATURE_ADVERTISE_FORMAT_VERSION) {
+        Limelog("Ignoring feature advertisement in unknown format %u\n", formatVersion);
+        return;
+    }
+
+    resetPeerFeatures();
+
+    for (i = 0; i < count; i++) {
+        uint16_t id, version;
+
+        if (!BbGet16(&bb, &id) || !BbGet16(&bb, &version)) {
+            Limelog("Feature advertisement claimed %u entries but ran out after %d\n", count, i);
+            break;
+        }
+
+        // Silently dropping the excess rather than refusing the message: a
+        // peer with more features than we can hold is not a broken peer, and
+        // the ones we did read are still true.
+        if (peerFeatureCount == FEATURE_ADVERTISE_MAX_COUNT) {
+            Limelog("Peer advertised more than %d features; ignoring the rest\n",
+                    FEATURE_ADVERTISE_MAX_COUNT);
+            break;
+        }
+
+        peerFeatures[peerFeatureCount].id = id;
+        peerFeatures[peerFeatureCount].version = version;
+        peerFeatureCount++;
+    }
+
+    Limelog("Peer advertised %u feature(s)\n", peerFeatureCount);
+}
+
+// Tell the peer what we support. Sent once, immediately after START B, so that
+// anything which runs during the session can rely on the answer.
+int sendFeatureAdvertise(void) {
+    char payload[4 + sizeof(localFeatures) / sizeof(localFeatures[0]) * 4];
+    BYTE_BUFFER bb;
+    unsigned int i;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+
+    BbPut8(&bb, FEATURE_ADVERTISE_FORMAT_VERSION);
+    BbPut8(&bb, 0);
+    BbPut16(&bb, (uint16_t)(sizeof(localFeatures) / sizeof(localFeatures[0])));
+
+    for (i = 0; i < sizeof(localFeatures) / sizeof(localFeatures[0]); i++) {
+        BbPut16(&bb, localFeatures[i].id);
+        BbPut16(&bb, localFeatures[i].version);
+    }
+
+    // Forget rather than await a reply: the peer answers with its own
+    // advertisement on its own schedule, and an old host that does not know
+    // 0x6000 would never reply at all.
+    return sendMessageAndForget(
+        packetTypes[IDX_FEATURE_ADVERTISE],
+        (short)bb.position,
+        payload,
+        CTRL_CHANNEL_FEATURE,
         ENET_PACKET_FLAG_RELIABLE,
         false
     );
