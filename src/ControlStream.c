@@ -143,6 +143,11 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_SET_CLIPBOARD 13
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 14
 #define IDX_DS_ADAPTIVE_TRIGGERS 15
+#define IDX_FEATURE_ADVERTISE 16
+#define IDX_CLIPBOARD_OFFER 17
+#define IDX_CLIPBOARD_REQUEST 18
+#define IDX_CLIPBOARD_DATA 19
+#define IDX_KEYBOARD_LAYOUT 20
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -164,6 +169,11 @@ static const short packetTypesGen3[] = {
     -1,     // Set Clipboard (unused)
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
+    -1,     // Feature advertisement (unused)
+    -1,     // Clipboard offer (unused)
+    -1,     // Clipboard request (unused)
+    -1,     // Clipboard data (unused)
+    -1,     // Keyboard layout (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -182,6 +192,11 @@ static const short packetTypesGen4[] = {
     -1,     // Set Clipboard (unused)
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
+    -1,     // Feature advertisement (unused)
+    -1,     // Clipboard offer (unused)
+    -1,     // Clipboard request (unused)
+    -1,     // Clipboard data (unused)
+    -1,     // Keyboard layout (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -200,6 +215,11 @@ static const short packetTypesGen5[] = {
     -1,     // Set Clipboard (unused)
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
+    -1,     // Feature advertisement (unused)
+    -1,     // Clipboard offer (unused)
+    -1,     // Clipboard request (unused)
+    -1,     // Clipboard data (unused)
+    -1,     // Keyboard layout (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -218,6 +238,11 @@ static const short packetTypesGen7[] = {
     -1,     // Set Clipboard (unused)
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
+    -1,     // Feature advertisement (unused)
+    -1,     // Clipboard offer (unused)
+    -1,     // Clipboard request (unused)
+    -1,     // Clipboard data (unused)
+    -1,     // Keyboard layout (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -236,6 +261,11 @@ static const short packetTypesGen7Enc[] = {
     0x3001, // Set Clipboard (Apollo protocol extension)
     0x3002, // File transfer nonce request (Apollo protocol extension)
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
+    0x6000, // Feature advertisement (Moonlight OS protocol extension)
+    0x6001, // Clipboard offer (Moonlight OS protocol extension)
+    0x6002, // Clipboard request (Moonlight OS protocol extension)
+    0x6003, // Clipboard data (Moonlight OS protocol extension)
+    0x6004, // Keyboard layout (Moonlight OS protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -312,6 +342,13 @@ static const char* preconstructedPayloadsGen7Enc[] = {
 };
 
 static short* packetTypes;
+
+// Defined with the rest of the feature negotiation further down, but called
+// from the receive loop above it.
+static void handleFeatureAdvertise(char* payload, int payloadLength);
+static void handleClipboardOffer(char* payload, int payloadLength);
+static void handleClipboardRequest(char* payload, int payloadLength);
+static void handleClipboardData(char* payload, int payloadLength);
 static short* payloadLengths;
 static char**preconstructedPayloads;
 static bool supportsIdrFrameRequest;
@@ -322,6 +359,12 @@ static bool supportsIdrFrameRequest;
 // Initializes the control stream
 int initializeControlStream(void) {
     stopping = false;
+
+    // Nothing is known about this peer until it says so. Without this, a
+    // second session inherits the first host's features and would happily use
+    // one the new host has never heard of.
+    resetPeerFeatures();
+
     PltCreateEvent(&idrFrameRequiredEvent);
     LbqInitializeLinkedBlockingQueue(&referenceFrameControlQueue, 20);
     LbqInitializeLinkedBlockingQueue(&frameFecStatusQueue, 8); // Limits number of frame status reports per periodic ping interval
@@ -1320,6 +1363,22 @@ static void controlReceiveThreadFunc(void* context) {
             if (needsAsyncCallback(ctlHdr->type)) {
                 queueAsyncCallback(ctlHdr, packetLength);
             }
+            // Handled here rather than on the async callback thread: this
+            // only writes a small table that the rest of the session reads,
+            // and doing it inline means the answer is settled before any
+            // feature code can ask.
+            else if (ctlHdr->type == packetTypes[IDX_FEATURE_ADVERTISE]) {
+                handleFeatureAdvertise((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_OFFER]) {
+                handleClipboardOffer((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_REQUEST]) {
+                handleClipboardRequest((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_DATA]) {
+                handleClipboardData((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
             else if (ctlHdr->type == packetTypes[IDX_TERMINATION]) {
                 BYTE_BUFFER bb;
 
@@ -1958,6 +2017,14 @@ int startControlStream(void) {
         return err;
     }
 
+    // Tell the host what this client supports, now that the control stream
+    // carries traffic. Failing to send is not fatal: every feature then reads
+    // as unsupported on both ends, which degrades the session rather than
+    // ending it.
+    if (!sendFeatureAdvertise()) {
+        Limelog("Failed to advertise client features; extensions will be unavailable\n");
+    }
+
     err = PltCreateThread("LossStats", lossStatsThreadFunc, NULL, &lossStatsThread);
     if (err != 0) {
         stopping = true;
@@ -2120,6 +2187,341 @@ int LiSendExecServerCmd(uint8_t cmdId) {
         ENET_PACKET_FLAG_RELIABLE,
         false
     );
+}
+
+// Feature negotiation.
+//
+// The wire format, deliberately dull so that adding a feature later is one
+// entry in a table and nothing else:
+//
+//   uint8   format version, currently 1
+//   uint8   reserved, must be zero
+//   uint16  count
+//   count x { uint16 featureId; uint16 featureVersion; }
+//
+// Little-endian throughout, matching the other extension messages. A peer that
+// does not understand 0x6000 at all simply never replies, which is
+// indistinguishable from one that supports nothing -- and that is the correct
+// reading of it.
+#define FEATURE_ADVERTISE_FORMAT_VERSION 1
+#define FEATURE_ADVERTISE_MAX_COUNT 64
+
+typedef struct _FEATURE_ENTRY {
+    uint16_t id;
+    uint16_t version;
+} FEATURE_ENTRY, *PFEATURE_ENTRY;
+
+// What the peer told us it can do. Written once from the control receive
+// thread before the caller is handed a running session, then only read.
+static FEATURE_ENTRY peerFeatures[FEATURE_ADVERTISE_MAX_COUNT];
+static uint16_t peerFeatureCount;
+
+// What we can do. Adding a feature means adding a line here and nothing else
+// on the sending side.
+static const FEATURE_ENTRY localFeatures[] = {
+    { ML_FEATURE_CLIPBOARD, 1 },
+    { ML_FEATURE_KEYBOARD_LAYOUT, 1 },
+};
+
+uint16_t LiGetPeerFeatureVersion(uint16_t featureId) {
+    int i;
+
+    for (i = 0; i < peerFeatureCount; i++) {
+        if (peerFeatures[i].id == featureId) {
+            return peerFeatures[i].version;
+        }
+    }
+
+    return 0;
+}
+
+void resetPeerFeatures(void) {
+    peerFeatureCount = 0;
+    memset(peerFeatures, 0, sizeof(peerFeatures));
+}
+
+// Read a peer advertisement. Hostile input: every length is checked against
+// what actually arrived rather than against what the header claims.
+static void handleFeatureAdvertise(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint8_t formatVersion;
+    uint8_t reserved;
+    uint16_t count;
+    int i;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+
+    if (!BbGet8(&bb, &formatVersion) || !BbGet8(&bb, &reserved) || !BbGet16(&bb, &count)) {
+        Limelog("Feature advertisement too short to read\n");
+        return;
+    }
+
+    // A newer peer may use a format we cannot parse. Ignoring the message
+    // leaves every feature reading as unsupported, which is the safe outcome:
+    // better to lose a feature than to misparse one.
+    if (formatVersion != FEATURE_ADVERTISE_FORMAT_VERSION) {
+        Limelog("Ignoring feature advertisement in unknown format %u\n", formatVersion);
+        return;
+    }
+
+    resetPeerFeatures();
+
+    for (i = 0; i < count; i++) {
+        uint16_t id, version;
+
+        if (!BbGet16(&bb, &id) || !BbGet16(&bb, &version)) {
+            Limelog("Feature advertisement claimed %u entries but ran out after %d\n", count, i);
+            break;
+        }
+
+        // Silently dropping the excess rather than refusing the message: a
+        // peer with more features than we can hold is not a broken peer, and
+        // the ones we did read are still true.
+        if (peerFeatureCount == FEATURE_ADVERTISE_MAX_COUNT) {
+            Limelog("Peer advertised more than %d features; ignoring the rest\n",
+                    FEATURE_ADVERTISE_MAX_COUNT);
+            break;
+        }
+
+        peerFeatures[peerFeatureCount].id = id;
+        peerFeatures[peerFeatureCount].version = version;
+        peerFeatureCount++;
+    }
+
+    Limelog("Peer advertised %u feature(s)\n", peerFeatureCount);
+}
+
+// Tell the peer what we support. Sent once, immediately after START B, so that
+// anything which runs during the session can rely on the answer.
+int sendFeatureAdvertise(void) {
+    char payload[4 + sizeof(localFeatures) / sizeof(localFeatures[0]) * 4];
+    BYTE_BUFFER bb;
+    unsigned int i;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+
+    BbPut8(&bb, FEATURE_ADVERTISE_FORMAT_VERSION);
+    BbPut8(&bb, 0);
+    BbPut16(&bb, (uint16_t)(sizeof(localFeatures) / sizeof(localFeatures[0])));
+
+    for (i = 0; i < sizeof(localFeatures) / sizeof(localFeatures[0]); i++) {
+        BbPut16(&bb, localFeatures[i].id);
+        BbPut16(&bb, localFeatures[i].version);
+    }
+
+    // Forget rather than await a reply: the peer answers with its own
+    // advertisement on its own schedule, and an old host that does not know
+    // 0x6000 would never reply at all.
+    return sendMessageAndForget(
+        packetTypes[IDX_FEATURE_ADVERTISE],
+        (short)bb.position,
+        payload,
+        CTRL_CHANNEL_FEATURE,
+        ENET_PACKET_FLAG_RELIABLE,
+        false
+    );
+}
+
+// Clipboard, as advertise-then-fetch. See Limelight.h for why data does not
+// travel with the offer.
+//
+// Wire formats, little-endian:
+//   offer   uint32 seq | uint16 count | uint16 reserved
+//                      | count x { uint16 format; uint32 sizeHint }
+//   request uint32 seq | uint16 format | uint16 reserved
+//   data    uint32 seq | uint16 format | uint16 reserved | uint32 length | bytes
+#define CLIPBOARD_MAX_FORMATS 8
+
+int LiSendClipboardOffer(uint32_t seq, const uint16_t* formats, const uint32_t* sizeHints, uint16_t formatCount) {
+    char payload[8 + CLIPBOARD_MAX_FORMATS * 6];
+    BYTE_BUFFER bb;
+    uint16_t i;
+
+    if (formatCount == 0 || formatCount > CLIPBOARD_MAX_FORMATS) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut32(&bb, seq);
+    BbPut16(&bb, formatCount);
+    BbPut16(&bb, 0);
+
+    for (i = 0; i < formatCount; i++) {
+        BbPut16(&bb, formats[i]);
+        BbPut32(&bb, sizeHints != NULL ? sizeHints[i] : 0);
+    }
+
+    return sendMessageAndForget(packetTypes[IDX_CLIPBOARD_OFFER], (short)bb.position, payload,
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+}
+
+int LiSendClipboardRequest(uint32_t seq, uint16_t format) {
+    char payload[8];
+    BYTE_BUFFER bb;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut32(&bb, seq);
+    BbPut16(&bb, format);
+    BbPut16(&bb, 0);
+
+    return sendMessageAndForget(packetTypes[IDX_CLIPBOARD_REQUEST], (short)bb.position, payload,
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+}
+
+int LiSendClipboardData(uint32_t seq, uint16_t format, const void* data, uint32_t length) {
+    char* payload;
+    BYTE_BUFFER bb;
+    int ret;
+
+    if (length > ML_CLIPBOARD_MAX_BYTES) {
+        Limelog("Refusing to send a %u byte clipboard payload\n", length);
+        return -1;
+    }
+
+    // Heap rather than stack: this is the one message here that can be large,
+    // and the cap above is megabytes.
+    payload = malloc(12 + length);
+    if (payload == NULL) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, 12 + length, BYTE_ORDER_LITTLE);
+    BbPut32(&bb, seq);
+    BbPut16(&bb, format);
+    BbPut16(&bb, 0);
+    BbPut32(&bb, length);
+    if (length != 0) {
+        memcpy(payload + 12, data, length);
+    }
+
+    ret = sendMessageAndForget(packetTypes[IDX_CLIPBOARD_DATA], (short)(12 + length), payload,
+                               CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+    free(payload);
+    return ret;
+}
+
+// Every length below is checked against what arrived rather than what the
+// header claims, because a peer is not a trusted source of sizes.
+static void handleClipboardOffer(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t seq;
+    uint16_t count, reserved;
+    uint16_t formats[CLIPBOARD_MAX_FORMATS];
+    uint32_t sizeHints[CLIPBOARD_MAX_FORMATS];
+    uint16_t i, parsed = 0;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+
+    if (!BbGet32(&bb, &seq) || !BbGet16(&bb, &count) || !BbGet16(&bb, &reserved)) {
+        Limelog("Clipboard offer too short\n");
+        return;
+    }
+
+    for (i = 0; i < count && parsed < CLIPBOARD_MAX_FORMATS; i++) {
+        if (!BbGet16(&bb, &formats[parsed]) || !BbGet32(&bb, &sizeHints[parsed])) {
+            break;
+        }
+        parsed++;
+    }
+
+    if (parsed == 0) {
+        Limelog("Clipboard offer named no readable formats\n");
+        return;
+    }
+
+    if (ListenerCallbacks.clipboardOffer != NULL) {
+        ListenerCallbacks.clipboardOffer(seq, formats, sizeHints, parsed);
+    }
+}
+
+static void handleClipboardRequest(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t seq;
+    uint16_t format, reserved;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+
+    if (!BbGet32(&bb, &seq) || !BbGet16(&bb, &format) || !BbGet16(&bb, &reserved)) {
+        Limelog("Clipboard request too short\n");
+        return;
+    }
+
+    if (ListenerCallbacks.clipboardRequest != NULL) {
+        ListenerCallbacks.clipboardRequest(seq, format);
+    }
+}
+
+static void handleClipboardData(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t seq, length;
+    uint16_t format, reserved;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+
+    if (!BbGet32(&bb, &seq) || !BbGet16(&bb, &format) ||
+        !BbGet16(&bb, &reserved) || !BbGet32(&bb, &length)) {
+        Limelog("Clipboard data too short\n");
+        return;
+    }
+
+    // The declared length must be backed by bytes that actually arrived.
+    // Trusting it instead would hand the callback a pointer past the packet.
+    if (length > (uint32_t)(payloadLength - 12)) {
+        Limelog("Clipboard data claimed %u bytes but carried %d\n", length, payloadLength - 12);
+        return;
+    }
+
+    if (ListenerCallbacks.clipboardData != NULL) {
+        ListenerCallbacks.clipboardData(seq, format, payload + 12, length);
+    }
+}
+
+// Tell the host which keyboard layout this client is typing on.
+//
+// Wire format, little-endian:
+//   uint8 version (1) | uint8 reserved | uint16 layoutLen | uint16 variantLen
+//   layoutLen bytes | variantLen bytes
+//
+// Both are XKB names -- "fr", "us", and a variant like "azerty" or "" -- and
+// neither is NUL terminated on the wire.
+//
+// Why the host wants it: the client sends scancodes, which are positions, and
+// the host turns positions into characters using its own layout. An AZERTY
+// client typing at a host set to US produces the wrong letters, which is the
+// papercut the appliance's keymap wizard exists to work around locally. What
+// the host does with this is the host's decision -- sending it is a handful of
+// bytes and costs nothing if it is ignored.
+int LiSendKeyboardLayout(const char* layout, const char* variant) {
+    char payload[6 + 64 + 64];
+    BYTE_BUFFER bb;
+    size_t layoutLen, variantLen;
+
+    if (layout == NULL) {
+        return -1;
+    }
+
+    layoutLen = strlen(layout);
+    variantLen = variant != NULL ? strlen(variant) : 0;
+
+    // Bounded to keep the message on the stack; no XKB name comes close.
+    if (layoutLen > 64 || variantLen > 64) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut8(&bb, 1);
+    BbPut8(&bb, 0);
+    BbPut16(&bb, (uint16_t)layoutLen);
+    BbPut16(&bb, (uint16_t)variantLen);
+
+    memcpy(payload + 6, layout, layoutLen);
+    if (variantLen != 0) {
+        memcpy(payload + 6 + layoutLen, variant, variantLen);
+    }
+
+    return sendMessageAndForget(packetTypes[IDX_KEYBOARD_LAYOUT],
+                                (short)(6 + layoutLen + variantLen), payload,
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
 }
 
 // Send a server cmd request to the streaming machine
