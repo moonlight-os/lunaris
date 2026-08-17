@@ -144,6 +144,9 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 14
 #define IDX_DS_ADAPTIVE_TRIGGERS 15
 #define IDX_FEATURE_ADVERTISE 16
+#define IDX_CLIPBOARD_OFFER 17
+#define IDX_CLIPBOARD_REQUEST 18
+#define IDX_CLIPBOARD_DATA 19
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -166,6 +169,9 @@ static const short packetTypesGen3[] = {
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
     -1,     // Feature advertisement (unused)
+    -1,     // Clipboard offer (unused)
+    -1,     // Clipboard request (unused)
+    -1,     // Clipboard data (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -185,6 +191,9 @@ static const short packetTypesGen4[] = {
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
     -1,     // Feature advertisement (unused)
+    -1,     // Clipboard offer (unused)
+    -1,     // Clipboard request (unused)
+    -1,     // Clipboard data (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -204,6 +213,9 @@ static const short packetTypesGen5[] = {
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
     -1,     // Feature advertisement (unused)
+    -1,     // Clipboard offer (unused)
+    -1,     // Clipboard request (unused)
+    -1,     // Clipboard data (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -223,6 +235,9 @@ static const short packetTypesGen7[] = {
     -1,     // File transfer nonce request (unused)
     -1,     // Set Adaptive Triggers (unused)
     -1,     // Feature advertisement (unused)
+    -1,     // Clipboard offer (unused)
+    -1,     // Clipboard request (unused)
+    -1,     // Clipboard data (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -242,6 +257,9 @@ static const short packetTypesGen7Enc[] = {
     0x3002, // File transfer nonce request (Apollo protocol extension)
     0x5503, // Set Adaptive Triggers (Sunshine protocol extension)
     0x6000, // Feature advertisement (Moonlight OS protocol extension)
+    0x6001, // Clipboard offer (Moonlight OS protocol extension)
+    0x6002, // Clipboard request (Moonlight OS protocol extension)
+    0x6003, // Clipboard data (Moonlight OS protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -322,6 +340,9 @@ static short* packetTypes;
 // Defined with the rest of the feature negotiation further down, but called
 // from the receive loop above it.
 static void handleFeatureAdvertise(char* payload, int payloadLength);
+static void handleClipboardOffer(char* payload, int payloadLength);
+static void handleClipboardRequest(char* payload, int payloadLength);
+static void handleClipboardData(char* payload, int payloadLength);
 static short* payloadLengths;
 static char**preconstructedPayloads;
 static bool supportsIdrFrameRequest;
@@ -1343,6 +1364,15 @@ static void controlReceiveThreadFunc(void* context) {
             else if (ctlHdr->type == packetTypes[IDX_FEATURE_ADVERTISE]) {
                 handleFeatureAdvertise((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
             }
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_OFFER]) {
+                handleClipboardOffer((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_REQUEST]) {
+                handleClipboardRequest((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_DATA]) {
+                handleClipboardData((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
             else if (ctlHdr->type == packetTypes[IDX_TERMINATION]) {
                 BYTE_BUFFER bb;
 
@@ -2284,6 +2314,160 @@ int sendFeatureAdvertise(void) {
         ENET_PACKET_FLAG_RELIABLE,
         false
     );
+}
+
+// Clipboard, as advertise-then-fetch. See Limelight.h for why data does not
+// travel with the offer.
+//
+// Wire formats, little-endian:
+//   offer   uint32 seq | uint16 count | uint16 reserved
+//                      | count x { uint16 format; uint32 sizeHint }
+//   request uint32 seq | uint16 format | uint16 reserved
+//   data    uint32 seq | uint16 format | uint16 reserved | uint32 length | bytes
+#define CLIPBOARD_MAX_FORMATS 8
+
+int LiSendClipboardOffer(uint32_t seq, const uint16_t* formats, const uint32_t* sizeHints, uint16_t formatCount) {
+    char payload[8 + CLIPBOARD_MAX_FORMATS * 6];
+    BYTE_BUFFER bb;
+    uint16_t i;
+
+    if (formatCount == 0 || formatCount > CLIPBOARD_MAX_FORMATS) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut32(&bb, seq);
+    BbPut16(&bb, formatCount);
+    BbPut16(&bb, 0);
+
+    for (i = 0; i < formatCount; i++) {
+        BbPut16(&bb, formats[i]);
+        BbPut32(&bb, sizeHints != NULL ? sizeHints[i] : 0);
+    }
+
+    return sendMessageAndForget(packetTypes[IDX_CLIPBOARD_OFFER], (short)bb.position, payload,
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+}
+
+int LiSendClipboardRequest(uint32_t seq, uint16_t format) {
+    char payload[8];
+    BYTE_BUFFER bb;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut32(&bb, seq);
+    BbPut16(&bb, format);
+    BbPut16(&bb, 0);
+
+    return sendMessageAndForget(packetTypes[IDX_CLIPBOARD_REQUEST], (short)bb.position, payload,
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+}
+
+int LiSendClipboardData(uint32_t seq, uint16_t format, const void* data, uint32_t length) {
+    char* payload;
+    BYTE_BUFFER bb;
+    int ret;
+
+    if (length > ML_CLIPBOARD_MAX_BYTES) {
+        Limelog("Refusing to send a %u byte clipboard payload\n", length);
+        return -1;
+    }
+
+    // Heap rather than stack: this is the one message here that can be large,
+    // and the cap above is megabytes.
+    payload = malloc(12 + length);
+    if (payload == NULL) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, 12 + length, BYTE_ORDER_LITTLE);
+    BbPut32(&bb, seq);
+    BbPut16(&bb, format);
+    BbPut16(&bb, 0);
+    BbPut32(&bb, length);
+    if (length != 0) {
+        memcpy(payload + 12, data, length);
+    }
+
+    ret = sendMessageAndForget(packetTypes[IDX_CLIPBOARD_DATA], (short)(12 + length), payload,
+                               CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+    free(payload);
+    return ret;
+}
+
+// Every length below is checked against what arrived rather than what the
+// header claims, because a peer is not a trusted source of sizes.
+static void handleClipboardOffer(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t seq;
+    uint16_t count, reserved;
+    uint16_t formats[CLIPBOARD_MAX_FORMATS];
+    uint32_t sizeHints[CLIPBOARD_MAX_FORMATS];
+    uint16_t i, parsed = 0;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+
+    if (!BbGet32(&bb, &seq) || !BbGet16(&bb, &count) || !BbGet16(&bb, &reserved)) {
+        Limelog("Clipboard offer too short\n");
+        return;
+    }
+
+    for (i = 0; i < count && parsed < CLIPBOARD_MAX_FORMATS; i++) {
+        if (!BbGet16(&bb, &formats[parsed]) || !BbGet32(&bb, &sizeHints[parsed])) {
+            break;
+        }
+        parsed++;
+    }
+
+    if (parsed == 0) {
+        Limelog("Clipboard offer named no readable formats\n");
+        return;
+    }
+
+    if (ListenerCallbacks.clipboardOffer != NULL) {
+        ListenerCallbacks.clipboardOffer(seq, formats, sizeHints, parsed);
+    }
+}
+
+static void handleClipboardRequest(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t seq;
+    uint16_t format, reserved;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+
+    if (!BbGet32(&bb, &seq) || !BbGet16(&bb, &format) || !BbGet16(&bb, &reserved)) {
+        Limelog("Clipboard request too short\n");
+        return;
+    }
+
+    if (ListenerCallbacks.clipboardRequest != NULL) {
+        ListenerCallbacks.clipboardRequest(seq, format);
+    }
+}
+
+static void handleClipboardData(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t seq, length;
+    uint16_t format, reserved;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+
+    if (!BbGet32(&bb, &seq) || !BbGet16(&bb, &format) ||
+        !BbGet16(&bb, &reserved) || !BbGet32(&bb, &length)) {
+        Limelog("Clipboard data too short\n");
+        return;
+    }
+
+    // The declared length must be backed by bytes that actually arrived.
+    // Trusting it instead would hand the callback a pointer past the packet.
+    if (length > (uint32_t)(payloadLength - 12)) {
+        Limelog("Clipboard data claimed %u bytes but carried %d\n", length, payloadLength - 12);
+        return;
+    }
+
+    if (ListenerCallbacks.clipboardData != NULL) {
+        ListenerCallbacks.clipboardData(seq, format, payload + 12, length);
+    }
 }
 
 // Send a server cmd request to the streaming machine

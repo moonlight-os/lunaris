@@ -483,6 +483,21 @@ typedef void(*ConnListenerSetAdaptiveTriggers)(uint16_t controllerNumber, uint8_
 // This callback is invoked to set a controller's RGB LED (if present).
 typedef void(*ConnListenerSetControllerLED)(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b);
 
+// Clipboard callbacks.
+//
+// These are invoked on the control stream's receive thread, NOT on the async
+// callback thread the gamepad callbacks use. That thread exists to keep slow
+// client work off the receive path, and its queue carries fixed-size records;
+// clipboard payloads are variable length and would have to be heap-copied into
+// it for no gain, because every implementation of these has to hand the work
+// to its own UI thread anyway. So: do not block in these, copy what you need
+// and marshal it out.
+//
+// The pointers are only valid for the duration of the call.
+typedef void(*ConnListenerClipboardOffer)(uint32_t seq, const uint16_t* formats, const uint32_t* sizeHints, uint16_t formatCount);
+typedef void(*ConnListenerClipboardRequest)(uint32_t seq, uint16_t format);
+typedef void(*ConnListenerClipboardData)(uint32_t seq, uint16_t format, const void* data, uint32_t length);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -497,6 +512,9 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerSetMotionEventState setMotionEventState;
     ConnListenerSetControllerLED setControllerLED;
     ConnListenerSetAdaptiveTriggers setAdaptiveTriggers;
+    ConnListenerClipboardOffer clipboardOffer;
+    ConnListenerClipboardRequest clipboardRequest;
+    ConnListenerClipboardData clipboardData;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -600,6 +618,41 @@ int LiSendEmptyPayload();
 // arrives. Features are negotiated before the stream is handed to the caller,
 // so any code that runs during a session sees the settled answer.
 uint16_t LiGetPeerFeatureVersion(uint16_t featureId);
+
+// Clipboard formats. Numbers are ours; the names are the MIME types they
+// correspond to on both platforms, which is what the platform layers speak.
+#define ML_CLIPBOARD_FORMAT_TEXT_UTF8  0x0001 // text/plain;charset=utf-8
+#define ML_CLIPBOARD_FORMAT_PNG        0x0002 // image/png
+
+// The largest single clipboard transfer, in bytes. A clipboard is a
+// convenience, not a file transfer: this bounds what a peer can make the other
+// side allocate, and anything above it is a job for M2 rather than a reason to
+// raise the limit.
+#define ML_CLIPBOARD_MAX_BYTES (4 * 1024 * 1024)
+
+// Clipboard, as advertise-then-fetch.
+//
+// Copying does NOT send the data. The origin sends an offer naming the formats
+// it holds; the far side takes selection ownership advertising those formats
+// and sends nothing back. Data crosses only when something actually pastes,
+// which is what LiSendClipboardRequest asks for. The naive alternative -- ship
+// every selection the moment it is made -- puts everything you ever highlight
+// on the network, and this maps onto what both platforms already do natively
+// (Win32 delayed rendering, and X11/Wayland selection ownership).
+//
+// seq is a counter owned by the offering side. It appears in the request and
+// in the data so that a late reply to a superseded offer can be recognised and
+// dropped, and so an offer cannot be echoed back as a new one -- which is what
+// would otherwise make two clipboards fight each other forever.
+
+// Announce what was just copied locally, without sending it.
+int LiSendClipboardOffer(uint32_t seq, const uint16_t* formats, const uint32_t* sizeHints, uint16_t formatCount);
+
+// Ask for the contents of an offer, when something actually pastes.
+int LiSendClipboardRequest(uint32_t seq, uint16_t format);
+
+// Answer a request. Fails if length exceeds ML_CLIPBOARD_MAX_BYTES.
+int LiSendClipboardData(uint32_t seq, uint16_t format, const void* data, uint32_t length);
 
 // This function queues a relative mouse move event to be sent to the remote server.
 int LiSendMouseMoveEvent(short deltaX, short deltaY);
