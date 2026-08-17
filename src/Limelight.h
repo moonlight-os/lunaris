@@ -654,6 +654,15 @@ int LiSendClipboardRequest(uint32_t seq, uint16_t format);
 // Answer a request. Fails if length exceeds ML_CLIPBOARD_MAX_BYTES.
 int LiSendClipboardData(uint32_t seq, uint16_t format, const void* data, uint32_t length);
 
+// Tell the host which keyboard layout this client types on, as XKB names --
+// layout "fr", variant "azerty" or NULL. Send it once the stream is up, and
+// only when the peer advertises ML_FEATURE_KEYBOARD_LAYOUT.
+//
+// The client sends scancodes, which are positions; the host turns positions
+// into characters using its own layout, so a mismatch is what makes an AZERTY
+// keyboard type the wrong letters on a US host.
+int LiSendKeyboardLayout(const char* layout, const char* variant);
+
 // This function queues a relative mouse move event to be sent to the remote server.
 int LiSendMouseMoveEvent(short deltaX, short deltaY);
 

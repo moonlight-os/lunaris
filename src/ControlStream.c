@@ -147,6 +147,7 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_CLIPBOARD_OFFER 17
 #define IDX_CLIPBOARD_REQUEST 18
 #define IDX_CLIPBOARD_DATA 19
+#define IDX_KEYBOARD_LAYOUT 20
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -172,6 +173,7 @@ static const short packetTypesGen3[] = {
     -1,     // Clipboard offer (unused)
     -1,     // Clipboard request (unused)
     -1,     // Clipboard data (unused)
+    -1,     // Keyboard layout (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -194,6 +196,7 @@ static const short packetTypesGen4[] = {
     -1,     // Clipboard offer (unused)
     -1,     // Clipboard request (unused)
     -1,     // Clipboard data (unused)
+    -1,     // Keyboard layout (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -216,6 +219,7 @@ static const short packetTypesGen5[] = {
     -1,     // Clipboard offer (unused)
     -1,     // Clipboard request (unused)
     -1,     // Clipboard data (unused)
+    -1,     // Keyboard layout (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -238,6 +242,7 @@ static const short packetTypesGen7[] = {
     -1,     // Clipboard offer (unused)
     -1,     // Clipboard request (unused)
     -1,     // Clipboard data (unused)
+    -1,     // Keyboard layout (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -260,6 +265,7 @@ static const short packetTypesGen7Enc[] = {
     0x6001, // Clipboard offer (Moonlight OS protocol extension)
     0x6002, // Clipboard request (Moonlight OS protocol extension)
     0x6003, // Clipboard data (Moonlight OS protocol extension)
+    0x6004, // Keyboard layout (Moonlight OS protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -2468,6 +2474,54 @@ static void handleClipboardData(char* payload, int payloadLength) {
     if (ListenerCallbacks.clipboardData != NULL) {
         ListenerCallbacks.clipboardData(seq, format, payload + 12, length);
     }
+}
+
+// Tell the host which keyboard layout this client is typing on.
+//
+// Wire format, little-endian:
+//   uint8 version (1) | uint8 reserved | uint16 layoutLen | uint16 variantLen
+//   layoutLen bytes | variantLen bytes
+//
+// Both are XKB names -- "fr", "us", and a variant like "azerty" or "" -- and
+// neither is NUL terminated on the wire.
+//
+// Why the host wants it: the client sends scancodes, which are positions, and
+// the host turns positions into characters using its own layout. An AZERTY
+// client typing at a host set to US produces the wrong letters, which is the
+// papercut the appliance's keymap wizard exists to work around locally. What
+// the host does with this is the host's decision -- sending it is a handful of
+// bytes and costs nothing if it is ignored.
+int LiSendKeyboardLayout(const char* layout, const char* variant) {
+    char payload[6 + 64 + 64];
+    BYTE_BUFFER bb;
+    size_t layoutLen, variantLen;
+
+    if (layout == NULL) {
+        return -1;
+    }
+
+    layoutLen = strlen(layout);
+    variantLen = variant != NULL ? strlen(variant) : 0;
+
+    // Bounded to keep the message on the stack; no XKB name comes close.
+    if (layoutLen > 64 || variantLen > 64) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut8(&bb, 1);
+    BbPut8(&bb, 0);
+    BbPut16(&bb, (uint16_t)layoutLen);
+    BbPut16(&bb, (uint16_t)variantLen);
+
+    memcpy(payload + 6, layout, layoutLen);
+    if (variantLen != 0) {
+        memcpy(payload + 6 + layoutLen, variant, variantLen);
+    }
+
+    return sendMessageAndForget(packetTypes[IDX_KEYBOARD_LAYOUT],
+                                (short)(6 + layoutLen + variantLen), payload,
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
 }
 
 // Send a server cmd request to the streaming machine
