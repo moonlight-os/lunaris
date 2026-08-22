@@ -66,6 +66,7 @@ static void AudioPingThreadProc(void* context) {
 
 // Initialize the audio stream and start
 int initializeAudioStream(void) {
+    initializeMicrophoneStream();
     LbqInitializeLinkedBlockingQueue(&packetQueue, 30);
     RtpaInitializeQueue(&rtpAudioQueue);
     lastSeq = 0;
@@ -124,6 +125,7 @@ static void freePacketList(PLINKED_BLOCKING_QUEUE_ENTRY entry) {
 
 // Tear down the audio stream once we're done with it
 void destroyAudioStream(void) {
+    destroyMicrophoneStream();
     if (rtpSocket != INVALID_SOCKET) {
         if (pingThreadStarted) {
             PltInterruptThread(&udpPingThread);

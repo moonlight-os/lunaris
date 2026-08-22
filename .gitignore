@@ -4,6 +4,7 @@ limelight-common/ARM/
 limelight-common/Debug/
 Build/
 cmake-*/
+/build-*/
 **/xcuserdata/
 limelight-common/Release/
 *.sdf

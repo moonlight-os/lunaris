@@ -37,6 +37,10 @@ extern uint16_t RtspPortNumber;
 extern uint16_t ControlPortNumber;
 extern uint16_t AudioPortNumber;
 extern uint16_t VideoPortNumber;
+extern ML_TRANSPORT_PROXY_CONFIG TransportProxyConfig;
+extern bool TransportProxyEnabled;
+extern uint16_t MicrophonePortNumber;
+extern uint16_t CameraPortNumber;
 
 extern SS_PING AudioPingPayload;
 extern SS_PING VideoPingPayload;
@@ -53,6 +57,11 @@ extern uint32_t EncryptionFeaturesSupported;
 extern uint32_t EncryptionFeaturesRequested;
 extern uint32_t EncryptionFeaturesEnabled;
 
+void initializeMicrophoneStream(void);
+void destroyMicrophoneStream(void);
+void initializeCameraStream(void);
+void destroyCameraStream(void);
+
 // ENet channel ID values
 #define CTRL_CHANNEL_GENERIC      0x00
 #define CTRL_CHANNEL_URGENT       0x01 // IDR, LTR ACK and RFI
@@ -68,6 +77,11 @@ extern uint32_t EncryptionFeaturesEnabled;
 // payload must not delay input, and input must not delay it.
 #define CTRL_CHANNEL_FEATURE      0x07
 #define CTRL_CHANNEL_SERVERCTL    0x08
+// USB/IP is a reliable byte stream and can be busy for the entire session.
+// Keeping it off the feature channel prevents a bulk transfer from delaying
+// clipboard replies or device-set updates, while still staying inside the
+// channel count both peers already negotiate.
+#define CTRL_CHANNEL_USB          0x09
 #define CTRL_CHANNEL_GAMEPAD_BASE 0x10 // 0x10 to 0x1F by controller index
 #define CTRL_CHANNEL_SENSOR_BASE  0x20 // 0x20 to 0x2F by controller index
 #define CTRL_CHANNEL_COUNT        0x30
@@ -94,6 +108,7 @@ extern uint32_t EncryptionFeaturesEnabled;
 // Client feature flags for x-ml-general.featureFlags SDP attribute
 #define ML_FF_FEC_STATUS 0x01 // Client sends SS_FRAME_FEC_STATUS for frame losses
 #define ML_FF_SESSION_ID_V1 0x02 // Client supports X-SS-Ping-Payload and X-SS-Connect-Data
+#define ML_FF_DISPLAY_TOPOLOGY_V1 0x04 // Client will send indexed display topology state
 
 #define UDP_RECV_POLL_TIMEOUT_MS 100
 

@@ -7,6 +7,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 option(USE_MBEDTLS "Use MbedTLS instead of OpenSSL" OFF)
 option(CODE_ANALYSIS "Run code analysis during compilation" OFF)
+option(BUILD_TESTS "Build protocol regression tests" ON)
 
 SET(CMAKE_C_STANDARD 11)
 
@@ -117,3 +118,10 @@ target_include_directories(moonlight-common-c SYSTEM PRIVATE
 )
 
 target_compile_definitions(moonlight-common-c PRIVATE HAS_SOCKLEN_T)
+
+if(BUILD_TESTS)
+  enable_testing()
+  add_executable(test-mlos-quic-wire tests/test_mlos_quic_wire.c src/MlosQuicWire.c)
+  target_include_directories(test-mlos-quic-wire PRIVATE src)
+  add_test(NAME mlos-quic-wire COMMAND test-mlos-quic-wire)
+endif()

@@ -100,6 +100,11 @@ typedef struct _STREAM_CONFIGURATION {
     // in /launch and /resume requests.
     char remoteInputAesKey[16];
     char remoteInputAesIv[16];
+
+    // Moonlight OS display topology index. Zero preserves the traditional
+    // primary stream. Additional independently rendered sessions select the
+    // corresponding entry from the topology snapshot.
+    uint16_t displayIndex;
 } STREAM_CONFIGURATION, *PSTREAM_CONFIGURATION;
 
 // Use this function to zero the stream configuration when allocated on the stack or heap
@@ -498,6 +503,18 @@ typedef void(*ConnListenerClipboardOffer)(uint32_t seq, const uint16_t* formats,
 typedef void(*ConnListenerClipboardRequest)(uint32_t seq, uint16_t format);
 typedef void(*ConnListenerClipboardData)(uint32_t seq, uint16_t format, const void* data, uint32_t length);
 
+// USB/IP tunnel callbacks. These run on the control receive thread and must
+// never block. Data pointers are valid only for the duration of the callback.
+typedef void(*ConnListenerUsbTunnelOpen)(uint32_t tunnelId);
+typedef void(*ConnListenerUsbTunnelData)(uint32_t tunnelId, const void* data, uint16_t length);
+typedef void(*ConnListenerUsbTunnelClose)(uint32_t tunnelId, uint16_t reason);
+
+// Read-only system-disk tunnel callbacks. Like the USB tunnel callbacks,
+// these run on the control receive thread and must never block.
+typedef void(*ConnListenerDiskTunnelOpen)(uint32_t tunnelId);
+typedef void(*ConnListenerDiskTunnelData)(uint32_t tunnelId, const void* data, uint16_t length);
+typedef void(*ConnListenerDiskTunnelClose)(uint32_t tunnelId, uint16_t reason);
+
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
     ConnListenerStageComplete stageComplete;
@@ -515,6 +532,12 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerClipboardOffer clipboardOffer;
     ConnListenerClipboardRequest clipboardRequest;
     ConnListenerClipboardData clipboardData;
+    ConnListenerUsbTunnelOpen usbTunnelOpen;
+    ConnListenerUsbTunnelData usbTunnelData;
+    ConnListenerUsbTunnelClose usbTunnelClose;
+    ConnListenerDiskTunnelOpen diskTunnelOpen;
+    ConnListenerDiskTunnelData diskTunnelData;
+    ConnListenerDiskTunnelClose diskTunnelClose;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -555,6 +578,19 @@ typedef struct _SERVER_INFORMATION {
     // Specifies the 'ServerCodecModeSupport' from the /serverinfo response.
     int serverCodecModeSupport;
 } SERVER_INFORMATION, *PSERVER_INFORMATION;
+
+// Optional loopback carrier endpoints used by Moonlight OS QUIC. The RTSP URL
+// and server address supplied to LiStartConnection must also point at the
+// loopback proxy. Passing NULL disables all overrides.
+typedef struct _ML_TRANSPORT_PROXY_CONFIG {
+    uint16_t videoPort;
+    uint16_t controlPort;
+    uint16_t audioPort;
+    uint16_t microphonePort;
+    uint16_t cameraPort;
+} ML_TRANSPORT_PROXY_CONFIG, *PML_TRANSPORT_PROXY_CONFIG;
+
+int LiSetTransportProxy(const ML_TRANSPORT_PROXY_CONFIG* config);
 
 // Use this function to zero the server information when allocated on the stack or heap
 void LiInitializeServerInformation(PSERVER_INFORMATION serverInfo);
@@ -608,6 +644,11 @@ int LiSendEmptyPayload();
 // something it has never heard of.
 #define ML_FEATURE_CLIPBOARD        0x0001 // Advertise-then-fetch clipboard
 #define ML_FEATURE_KEYBOARD_LAYOUT  0x0002 // Client tells the host its layout
+#define ML_FEATURE_USB_PASSTHROUGH  0x0003 // Session-owned USB/IP tunnel
+#define ML_FEATURE_MICROPHONE       0x0004 // Authenticated Opus microphone uplink
+#define ML_FEATURE_CAMERA           0x0005 // Authenticated fragmented camera uplink
+#define ML_FEATURE_DISPLAY_TOPOLOGY 0x0006 // Client monitor topology and hotplug updates
+#define ML_FEATURE_SYSTEM_DISK      0x0007 // Session-owned read-only system disk
 
 // The version of a feature the peer advertised, or 0 when it did not advertise
 // it at all -- so a plain truth test is the right way to ask whether a feature
@@ -618,6 +659,16 @@ int LiSendEmptyPayload();
 // arrives. Features are negotiated before the stream is handed to the caller,
 // so any code that runs during a session sees the settled answer.
 uint16_t LiGetPeerFeatureVersion(uint16_t featureId);
+
+// All Moonlight OS extension send functions below return 0 on success and a
+// non-zero value on validation, allocation, or transport failure.
+
+// Send one already-encoded Opus microphone frame on the dedicated UDP
+// uplink. The packet is authenticated with the session key and carries a
+// sample-clock timestamp; loss is tolerated and packets are never retried.
+// samples is the number of samples per channel represented by this frame.
+int LiSendMicrophoneOpus(const void* opusData, uint16_t opusLength,
+                         uint32_t timestamp, uint16_t samples, uint8_t channels);
 
 // Clipboard formats. Numbers are ours; the names are the MIME types they
 // correspond to on both platforms, which is what the platform layers speak.
@@ -662,6 +713,62 @@ int LiSendClipboardData(uint32_t seq, uint16_t format, const void* data, uint32_
 // into characters using its own layout, so a mismatch is what makes an AZERTY
 // keyboard type the wrong letters on a US host.
 int LiSendKeyboardLayout(const char* layout, const char* variant);
+
+// Declarative USB device offer. This is the session equivalent of the old
+// mlos-host-utils `sync` operation: the array is the complete set the client
+// offers right now, and anything from this session absent from a later array
+// must be detached by the host. An empty array means detach everything.
+//
+// The strings are copied before this function returns. busId is the Linux
+// USB topology id (for example "1-2.3"), hwId is "vvvv:pppp", and label is
+// only for human-readable status. generation lets a result for an older
+// hotplug survey be discarded.
+typedef struct _ML_USB_DEVICE {
+    const char* busId;
+    const char* hwId;
+    const char* label;
+} ML_USB_DEVICE, *PML_USB_DEVICE;
+
+int LiSendUsbDeviceSync(uint32_t generation, const ML_USB_DEVICE* devices, uint16_t deviceCount);
+
+// A complete snapshot of the client's physical monitor topology. Positions
+// are in unified desktop pixels and may be negative. refreshRate is in mHz
+// and scale is in thousandths so the wire format contains no floats.
+#define ML_DISPLAY_FLAG_PRIMARY 0x0001
+#define ML_DISPLAY_FLAG_HDR     0x0002
+
+typedef struct _ML_DISPLAY_DESC {
+    int32_t x;
+    int32_t y;
+    uint32_t width;
+    uint32_t height;
+    uint32_t refreshRate;
+    uint32_t scale;
+    uint16_t physicalWidthMm;
+    uint16_t physicalHeightMm;
+    uint16_t flags;
+} ML_DISPLAY_DESC, *PML_DISPLAY_DESC;
+
+int LiSendDisplayTopology(uint32_t generation, const ML_DISPLAY_DESC* displays, uint16_t displayCount);
+
+// Advertise the appliance's session-owned read-only iSCSI target. The target
+// is reachable only through the matching disk tunnel; no LAN portal is
+// exposed. An empty IQN withdraws the current offer.
+int LiSendSystemDiskOffer(uint32_t generation, const char* targetIqn,
+                          uint64_t size, uint32_t sectorSize);
+
+#define ML_USB_TUNNEL_MAX_CHUNK 16384
+#define ML_USB_TUNNEL_CLOSE_NORMAL 0
+#define ML_USB_TUNNEL_CLOSE_CONNECT_FAILED 1
+#define ML_USB_TUNNEL_CLOSE_IO_ERROR 2
+#define ML_USB_TUNNEL_CLOSE_PROTOCOL_ERROR 3
+
+int LiSendUsbTunnelData(uint32_t tunnelId, const void* data, uint16_t length);
+int LiSendUsbTunnelClose(uint32_t tunnelId, uint16_t reason);
+
+#define ML_DISK_TUNNEL_MAX_CHUNK 16384
+int LiSendDiskTunnelData(uint32_t tunnelId, const void* data, uint16_t length);
+int LiSendDiskTunnelClose(uint32_t tunnelId, uint16_t reason);
 
 // This function queues a relative mouse move event to be sent to the remote server.
 int LiSendMouseMoveEvent(short deltaX, short deltaY);
@@ -1104,7 +1211,16 @@ void LiRequestIdrFrame(void);
 // This function returns any extended feature flags supported by the host.
 #define LI_FF_PEN_TOUCH_EVENTS        0x01 // LiSendTouchEvent()/LiSendPenEvent() supported
 #define LI_FF_CONTROLLER_TOUCH_EVENTS 0x02 // LiSendControllerTouchEvent() supported
+#define LI_FF_MICROPHONE_UPLINK       0x04 // Host accepts the Selene microphone stream
+#define LI_FF_CAMERA_UPLINK           0x08 // Host accepts the Selene camera stream
 uint32_t LiGetHostFeatureFlags(void);
+
+// Sends one complete MJPEG camera frame. The implementation fragments and
+// authenticates the frame into MTU-safe UDP datagrams. The frame is dropped as
+// a unit if any fragment is lost; the next frame remains independently usable.
+int LiSendCameraMjpeg(const void* jpegData, uint32_t jpegLength,
+                      uint32_t frameId, uint32_t timestampMs,
+                      uint16_t width, uint16_t height);
 
 #ifdef __cplusplus
 }

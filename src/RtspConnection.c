@@ -952,6 +952,8 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     hasSessionId = false;
     controlStreamId = APP_VERSION_AT_LEAST(7, 1, 431) ? "streamid=control/13/0" : "streamid=control/1/0";
     AudioEncryptionEnabled = false;
+    MicrophonePortNumber = 0;
+    CameraPortNumber = 0;
     encryptedRtspEnabled = serverInfo->rtspSessionUrl && strstr(serverInfo->rtspSessionUrl, "rtspenc://");
     encryptionCtx = PltCreateCryptoContext();
     decryptionCtx = PltCreateCryptoContext();
@@ -1198,6 +1200,9 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Audio port: %u\n", AudioPortNumber);
         }
+        if (TransportProxyEnabled) {
+            AudioPortNumber = TransportProxyConfig.audioPort;
+        }
 
         // Parse the Sunshine ping payload protocol extension if present
         memset(&AudioPingPayload, 0, sizeof(AudioPingPayload));
@@ -1282,6 +1287,9 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Video port: %u\n", VideoPortNumber);
         }
+        if (TransportProxyEnabled) {
+            VideoPortNumber = TransportProxyConfig.videoPort;
+        }
 
         freeMessage(&response);
     }
@@ -1326,7 +1334,72 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
         else {
             Limelog("Control port: %u\n", ControlPortNumber);
         }
+        if (TransportProxyEnabled) {
+            ControlPortNumber = TransportProxyConfig.controlPort;
+        }
 
+        freeMessage(&response);
+    }
+
+    if (SunshineFeatureFlags & LI_FF_MICROPHONE_UPLINK) {
+        RTSP_MESSAGE response;
+        int error = -1;
+
+        if (!setupStream(&response, "streamid=microphone/0/0", &error)) {
+            Limelog("RTSP SETUP streamid=microphone request failed: %d\n", error);
+            ret = error;
+            goto Exit;
+        }
+
+        if (response.message.response.statusCode != 200) {
+            Limelog("RTSP SETUP streamid=microphone request failed: %d\n",
+                    response.message.response.statusCode);
+            ret = response.message.response.statusCode;
+            goto Exit;
+        }
+
+        if (!parseServerPortFromTransport(&response, &MicrophonePortNumber) ||
+                MicrophonePortNumber == 0) {
+            Limelog("RTSP SETUP streamid=microphone returned no usable port\n");
+            freeMessage(&response);
+            ret = -1;
+            goto Exit;
+        }
+        Limelog("Microphone port: %u\n", MicrophonePortNumber);
+        if (TransportProxyEnabled && TransportProxyConfig.microphonePort != 0) {
+            MicrophonePortNumber = TransportProxyConfig.microphonePort;
+        }
+        freeMessage(&response);
+    }
+
+    if (SunshineFeatureFlags & LI_FF_CAMERA_UPLINK) {
+        RTSP_MESSAGE response;
+        int error = -1;
+
+        if (!setupStream(&response, "streamid=camera/0/0", &error)) {
+            Limelog("RTSP SETUP streamid=camera request failed: %d\n", error);
+            ret = error;
+            goto Exit;
+        }
+
+        if (response.message.response.statusCode != 200) {
+            Limelog("RTSP SETUP streamid=camera request failed: %d\n",
+                    response.message.response.statusCode);
+            ret = response.message.response.statusCode;
+            goto Exit;
+        }
+
+        if (!parseServerPortFromTransport(&response, &CameraPortNumber) ||
+                CameraPortNumber == 0) {
+            Limelog("RTSP SETUP streamid=camera returned no usable port\n");
+            freeMessage(&response);
+            ret = -1;
+            goto Exit;
+        }
+        Limelog("Camera port: %u\n", CameraPortNumber);
+        if (TransportProxyEnabled && TransportProxyConfig.cameraPort != 0) {
+            CameraPortNumber = TransportProxyConfig.cameraPort;
+        }
         freeMessage(&response);
     }
 

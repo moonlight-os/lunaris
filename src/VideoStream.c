@@ -36,6 +36,7 @@ static bool receivedFullFrame;
 
 // Initialize the video stream
 void initializeVideoStream(void) {
+    initializeCameraStream();
     initializeVideoDepacketizer(StreamConfig.packetSize);
     RtpvInitializeQueue(&rtpQueue);
     decryptionCtx = PltCreateCryptoContext();
@@ -46,6 +47,7 @@ void initializeVideoStream(void) {
 
 // Clean up the video stream
 void destroyVideoStream(void) {
+    destroyCameraStream();
     PltDestroyCryptoContext(decryptionCtx);
     destroyVideoDepacketizer();
     RtpvCleanupQueue(&rtpQueue);

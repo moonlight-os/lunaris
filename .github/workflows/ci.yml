@@ -4,7 +4,7 @@ name: CI
 on:
   pull_request:
     branches:
-      - master
+      - main
     types:
       - opened
       - synchronize
@@ -77,3 +77,6 @@ jobs:
           mkdir build_release
           cmake ${{ matrix.cmake_args }} -DCMAKE_BUILD_TYPE=Release -B build_release -S .
           cmake --build build_release --config Release
+
+      - name: Test
+        run: ctest --test-dir build_debug -C Debug --output-on-failure

@@ -29,6 +29,10 @@ uint16_t RtspPortNumber;
 uint16_t ControlPortNumber;
 uint16_t AudioPortNumber;
 uint16_t VideoPortNumber;
+ML_TRANSPORT_PROXY_CONFIG TransportProxyConfig;
+bool TransportProxyEnabled;
+uint16_t MicrophonePortNumber;
+uint16_t CameraPortNumber;
 SS_PING AudioPingPayload;
 SS_PING VideoPingPayload;
 uint32_t ControlConnectData;
@@ -545,6 +549,20 @@ Cleanup:
         LiStopConnection();
     }
     return err;
+}
+
+int LiSetTransportProxy(const ML_TRANSPORT_PROXY_CONFIG* config) {
+    if (config == NULL) {
+        memset(&TransportProxyConfig, 0, sizeof(TransportProxyConfig));
+        TransportProxyEnabled = false;
+        return 0;
+    }
+    if (config->videoPort == 0 || config->controlPort == 0 || config->audioPort == 0) {
+        return -1;
+    }
+    TransportProxyConfig = *config;
+    TransportProxyEnabled = true;
+    return 0;
 }
 
 const char* LiGetLaunchUrlQueryParameters(void) {

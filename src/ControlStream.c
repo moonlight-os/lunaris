@@ -148,6 +148,15 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_CLIPBOARD_REQUEST 18
 #define IDX_CLIPBOARD_DATA 19
 #define IDX_KEYBOARD_LAYOUT 20
+#define IDX_USB_DEVICE_SYNC 21
+#define IDX_USB_TUNNEL_OPEN 22
+#define IDX_USB_TUNNEL_DATA 23
+#define IDX_USB_TUNNEL_CLOSE 24
+#define IDX_DISPLAY_TOPOLOGY 25
+#define IDX_SYSTEM_DISK_OFFER 26
+#define IDX_DISK_TUNNEL_OPEN 27
+#define IDX_DISK_TUNNEL_DATA 28
+#define IDX_DISK_TUNNEL_CLOSE 29
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -174,6 +183,15 @@ static const short packetTypesGen3[] = {
     -1,     // Clipboard request (unused)
     -1,     // Clipboard data (unused)
     -1,     // Keyboard layout (unused)
+    -1,     // USB device sync (unused)
+    -1,     // USB tunnel open (unused)
+    -1,     // USB tunnel data (unused)
+    -1,     // USB tunnel close (unused)
+    -1,     // Display topology (unused)
+    -1,     // System disk offer (unused)
+    -1,     // Disk tunnel open (unused)
+    -1,     // Disk tunnel data (unused)
+    -1,     // Disk tunnel close (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -197,6 +215,15 @@ static const short packetTypesGen4[] = {
     -1,     // Clipboard request (unused)
     -1,     // Clipboard data (unused)
     -1,     // Keyboard layout (unused)
+    -1,     // USB device sync (unused)
+    -1,     // USB tunnel open (unused)
+    -1,     // USB tunnel data (unused)
+    -1,     // USB tunnel close (unused)
+    -1,     // Display topology (unused)
+    -1,     // System disk offer (unused)
+    -1,     // Disk tunnel open (unused)
+    -1,     // Disk tunnel data (unused)
+    -1,     // Disk tunnel close (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -220,6 +247,15 @@ static const short packetTypesGen5[] = {
     -1,     // Clipboard request (unused)
     -1,     // Clipboard data (unused)
     -1,     // Keyboard layout (unused)
+    -1,     // USB device sync (unused)
+    -1,     // USB tunnel open (unused)
+    -1,     // USB tunnel data (unused)
+    -1,     // USB tunnel close (unused)
+    -1,     // Display topology (unused)
+    -1,     // System disk offer (unused)
+    -1,     // Disk tunnel open (unused)
+    -1,     // Disk tunnel data (unused)
+    -1,     // Disk tunnel close (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -243,6 +279,15 @@ static const short packetTypesGen7[] = {
     -1,     // Clipboard request (unused)
     -1,     // Clipboard data (unused)
     -1,     // Keyboard layout (unused)
+    -1,     // USB device sync (unused)
+    -1,     // USB tunnel open (unused)
+    -1,     // USB tunnel data (unused)
+    -1,     // USB tunnel close (unused)
+    -1,     // Display topology (unused)
+    -1,     // System disk offer (unused)
+    -1,     // Disk tunnel open (unused)
+    -1,     // Disk tunnel data (unused)
+    -1,     // Disk tunnel close (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -266,6 +311,15 @@ static const short packetTypesGen7Enc[] = {
     0x6002, // Clipboard request (Moonlight OS protocol extension)
     0x6003, // Clipboard data (Moonlight OS protocol extension)
     0x6004, // Keyboard layout (Moonlight OS protocol extension)
+    0x6005, // USB device sync (Moonlight OS protocol extension)
+    0x6006, // USB tunnel open (Moonlight OS protocol extension)
+    0x6007, // USB tunnel data (Moonlight OS protocol extension)
+    0x6008, // USB tunnel close (Moonlight OS protocol extension)
+    0x6009, // Display topology (Moonlight OS protocol extension)
+    0x600a, // System disk offer (Moonlight OS protocol extension)
+    0x600b, // Disk tunnel open (Moonlight OS protocol extension)
+    0x600c, // Disk tunnel data (Moonlight OS protocol extension)
+    0x600d, // Disk tunnel close (Moonlight OS protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -349,6 +403,12 @@ static void handleFeatureAdvertise(char* payload, int payloadLength);
 static void handleClipboardOffer(char* payload, int payloadLength);
 static void handleClipboardRequest(char* payload, int payloadLength);
 static void handleClipboardData(char* payload, int payloadLength);
+static void handleUsbTunnelOpen(char* payload, int payloadLength);
+static void handleUsbTunnelData(char* payload, int payloadLength);
+static void handleUsbTunnelClose(char* payload, int payloadLength);
+static void handleDiskTunnelOpen(char* payload, int payloadLength);
+static void handleDiskTunnelData(char* payload, int payloadLength);
+static void handleDiskTunnelClose(char* payload, int payloadLength);
 static short* payloadLengths;
 static char**preconstructedPayloads;
 static bool supportsIdrFrameRequest;
@@ -768,12 +828,22 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
     if (encryptedControlStream) {
         PNVCTL_ENCRYPTED_PACKET_HEADER encPacket;
         PNVCTL_ENET_PACKET_HEADER_V2 packet;
-        char tempBuffer[256];
+        char* plaintext;
+
+        if (paylen < 0) {
+            return false;
+        }
+
+        plaintext = malloc(sizeof(*packet) + paylen);
+        if (plaintext == NULL) {
+            return false;
+        }
 
         enetPacket = enet_packet_create(NULL,
                                         sizeof(*encPacket) + AES_GCM_TAG_LENGTH + sizeof(*packet) + paylen,
                                         flags);
         if (enetPacket == NULL) {
+            free(plaintext);
             return false;
         }
 
@@ -787,8 +857,7 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         encPacket->seq = currentEnetSequenceNumber++;
 
         // Construct the plaintext data for encryption
-        LC_ASSERT(sizeof(*packet) + paylen < sizeof(tempBuffer));
-        packet = (PNVCTL_ENET_PACKET_HEADER_V2)tempBuffer;
+        packet = (PNVCTL_ENET_PACKET_HEADER_V2)plaintext;
         packet->type = ptype;
         packet->payloadLength = paylen;
         memcpy(&packet[1], payload, paylen);
@@ -796,10 +865,12 @@ static bool sendMessageEnet(short ptype, short paylen, const void* payload, uint
         // Encrypt the data into the final packet (and byteswap for BE machines)
         if (!encryptControlMessage(encPacket, packet)) {
             Limelog("Failed to encrypt control stream message\n");
+            free(plaintext);
             enet_packet_destroy(enetPacket);
             PltUnlockMutex(&enetMutex);
             return false;
         }
+        free(plaintext);
 
         // enetMutex still locked here
     }
@@ -1370,14 +1441,41 @@ static void controlReceiveThreadFunc(void* context) {
             else if (ctlHdr->type == packetTypes[IDX_FEATURE_ADVERTISE]) {
                 handleFeatureAdvertise((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
             }
-            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_OFFER]) {
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_OFFER] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_CLIPBOARD) != 0) {
                 handleClipboardOffer((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
             }
-            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_REQUEST]) {
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_REQUEST] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_CLIPBOARD) != 0) {
                 handleClipboardRequest((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
             }
-            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_DATA]) {
+            else if (ctlHdr->type == packetTypes[IDX_CLIPBOARD_DATA] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_CLIPBOARD) != 0) {
                 handleClipboardData((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_USB_TUNNEL_OPEN] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_USB_PASSTHROUGH) != 0) {
+                handleUsbTunnelOpen((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_USB_TUNNEL_DATA] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_USB_PASSTHROUGH) != 0) {
+                handleUsbTunnelData((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_USB_TUNNEL_CLOSE] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_USB_PASSTHROUGH) != 0) {
+                handleUsbTunnelClose((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_DISK_TUNNEL_OPEN] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) != 0) {
+                handleDiskTunnelOpen((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_DISK_TUNNEL_DATA] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) != 0) {
+                handleDiskTunnelData((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
+            else if (ctlHdr->type == packetTypes[IDX_DISK_TUNNEL_CLOSE] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) != 0) {
+                handleDiskTunnelClose((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
             }
             else if (ctlHdr->type == packetTypes[IDX_TERMINATION]) {
                 BYTE_BUFFER bb;
@@ -2176,6 +2274,185 @@ bool LiGetHdrMetadata(PSS_HDR_METADATA metadata) {
     return true;
 }
 
+int LiSendUsbTunnelData(uint32_t tunnelId, const void* data, uint16_t length) {
+    char* payload;
+    BYTE_BUFFER bb;
+    int ret;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_USB_PASSTHROUGH) == 0 ||
+            data == NULL || length == 0 || length > ML_USB_TUNNEL_MAX_CHUNK) {
+        return -1;
+    }
+
+    payload = malloc(8 + length);
+    if (payload == NULL) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, 8 + length, BYTE_ORDER_LITTLE);
+    BbPut32(&bb, tunnelId);
+    BbPut16(&bb, length);
+    BbPut16(&bb, 0);
+    memcpy(payload + 8, data, length);
+
+    ret = sendMessageAndForget(packetTypes[IDX_USB_TUNNEL_DATA], (short)(8 + length), payload,
+                               CTRL_CHANNEL_USB, ENET_PACKET_FLAG_RELIABLE, false);
+    free(payload);
+    return ret ? 0 : -1;
+}
+
+int LiSendUsbTunnelClose(uint32_t tunnelId, uint16_t reason) {
+    char payload[8];
+    BYTE_BUFFER bb;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_USB_PASSTHROUGH) == 0) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut32(&bb, tunnelId);
+    BbPut16(&bb, reason);
+    BbPut16(&bb, 0);
+    return sendMessageAndForget(packetTypes[IDX_USB_TUNNEL_CLOSE], sizeof(payload), payload,
+                                CTRL_CHANNEL_USB, ENET_PACKET_FLAG_RELIABLE, false) ? 0 : -1;
+}
+
+static void handleUsbTunnelOpen(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t tunnelId, reserved;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+    if (payloadLength != 8 || !BbGet32(&bb, &tunnelId) ||
+        !BbGet32(&bb, &reserved) || reserved != 0) {
+        Limelog("Malformed USB tunnel open\n");
+        return;
+    }
+
+    if (ListenerCallbacks.usbTunnelOpen != NULL) {
+        ListenerCallbacks.usbTunnelOpen(tunnelId);
+    }
+}
+
+static void handleUsbTunnelData(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t tunnelId;
+    uint16_t length, reserved;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+    if (payloadLength < 8 || !BbGet32(&bb, &tunnelId) ||
+        !BbGet16(&bb, &length) || !BbGet16(&bb, &reserved) ||
+        reserved != 0 || length == 0 || length > ML_USB_TUNNEL_MAX_CHUNK ||
+        payloadLength != 8 + length) {
+        Limelog("Malformed USB tunnel data\n");
+        return;
+    }
+
+    if (ListenerCallbacks.usbTunnelData != NULL) {
+        ListenerCallbacks.usbTunnelData(tunnelId, payload + 8, length);
+    }
+}
+
+static void handleUsbTunnelClose(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t tunnelId;
+    uint16_t reason, reserved;
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+    if (payloadLength != 8 || !BbGet32(&bb, &tunnelId) ||
+        !BbGet16(&bb, &reason) || !BbGet16(&bb, &reserved) || reserved != 0) {
+        Limelog("Malformed USB tunnel close\n");
+        return;
+    }
+
+    if (ListenerCallbacks.usbTunnelClose != NULL) {
+        ListenerCallbacks.usbTunnelClose(tunnelId, reason);
+    }
+}
+
+int LiSendDiskTunnelData(uint32_t tunnelId, const void* data, uint16_t length) {
+    char* payload;
+    BYTE_BUFFER bb;
+    int ret;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) == 0 ||
+            data == NULL || length == 0 || length > ML_DISK_TUNNEL_MAX_CHUNK) {
+        return -1;
+    }
+    payload = malloc(8 + length);
+    if (payload == NULL) {
+        return -1;
+    }
+    BbInitializeWrappedBuffer(&bb, payload, 0, 8 + length, BYTE_ORDER_LITTLE);
+    BbPut32(&bb, tunnelId);
+    BbPut16(&bb, length);
+    BbPut16(&bb, 0);
+    memcpy(payload + 8, data, length);
+    ret = sendMessageAndForget(packetTypes[IDX_DISK_TUNNEL_DATA], (short)(8 + length), payload,
+                               CTRL_CHANNEL_USB, ENET_PACKET_FLAG_RELIABLE, false);
+    free(payload);
+    return ret ? 0 : -1;
+}
+
+int LiSendDiskTunnelClose(uint32_t tunnelId, uint16_t reason) {
+    char payload[8];
+    BYTE_BUFFER bb;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) == 0) {
+        return -1;
+    }
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut32(&bb, tunnelId);
+    BbPut16(&bb, reason);
+    BbPut16(&bb, 0);
+    return sendMessageAndForget(packetTypes[IDX_DISK_TUNNEL_CLOSE], sizeof(payload), payload,
+                                CTRL_CHANNEL_USB, ENET_PACKET_FLAG_RELIABLE, false) ? 0 : -1;
+}
+
+static void handleDiskTunnelOpen(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t tunnelId, reserved;
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+    if (payloadLength != 8 || !BbGet32(&bb, &tunnelId) ||
+            !BbGet32(&bb, &reserved) || reserved != 0) {
+        Limelog("Malformed disk tunnel open\n");
+        return;
+    }
+    if (ListenerCallbacks.diskTunnelOpen != NULL) {
+        ListenerCallbacks.diskTunnelOpen(tunnelId);
+    }
+}
+
+static void handleDiskTunnelData(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t tunnelId;
+    uint16_t length, reserved;
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+    if (payloadLength < 8 || !BbGet32(&bb, &tunnelId) || !BbGet16(&bb, &length) ||
+            !BbGet16(&bb, &reserved) || reserved != 0 || length == 0 ||
+            length > ML_DISK_TUNNEL_MAX_CHUNK || payloadLength != 8 + length) {
+        Limelog("Malformed disk tunnel data\n");
+        return;
+    }
+    if (ListenerCallbacks.diskTunnelData != NULL) {
+        ListenerCallbacks.diskTunnelData(tunnelId, payload + 8, length);
+    }
+}
+
+static void handleDiskTunnelClose(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint32_t tunnelId;
+    uint16_t reason, reserved;
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+    if (payloadLength != 8 || !BbGet32(&bb, &tunnelId) ||
+            !BbGet16(&bb, &reason) || !BbGet16(&bb, &reserved) || reserved != 0) {
+        Limelog("Malformed disk tunnel close\n");
+        return;
+    }
+    if (ListenerCallbacks.diskTunnelClose != NULL) {
+        ListenerCallbacks.diskTunnelClose(tunnelId, reason);
+    }
+}
+
 // Send a server cmd request to the streaming machine
 int LiSendExecServerCmd(uint8_t cmdId) {
     uint8_t payload[4] = {cmdId, 0, 0, 0};
@@ -2221,6 +2498,11 @@ static uint16_t peerFeatureCount;
 static const FEATURE_ENTRY localFeatures[] = {
     { ML_FEATURE_CLIPBOARD, 1 },
     { ML_FEATURE_KEYBOARD_LAYOUT, 1 },
+    { ML_FEATURE_USB_PASSTHROUGH, 1 },
+    { ML_FEATURE_MICROPHONE, 1 },
+    { ML_FEATURE_CAMERA, 1 },
+    { ML_FEATURE_DISPLAY_TOPOLOGY, 1 },
+    { ML_FEATURE_SYSTEM_DISK, 1 },
 };
 
 uint16_t LiGetPeerFeatureVersion(uint16_t featureId) {
@@ -2247,6 +2529,8 @@ static void handleFeatureAdvertise(char* payload, int payloadLength) {
     uint8_t formatVersion;
     uint8_t reserved;
     uint16_t count;
+    FEATURE_ENTRY parsed[FEATURE_ADVERTISE_MAX_COUNT];
+    uint16_t supportedCount;
     int i;
 
     BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
@@ -2259,34 +2543,50 @@ static void handleFeatureAdvertise(char* payload, int payloadLength) {
     // A newer peer may use a format we cannot parse. Ignoring the message
     // leaves every feature reading as unsupported, which is the safe outcome:
     // better to lose a feature than to misparse one.
-    if (formatVersion != FEATURE_ADVERTISE_FORMAT_VERSION) {
-        Limelog("Ignoring feature advertisement in unknown format %u\n", formatVersion);
+    if (formatVersion != FEATURE_ADVERTISE_FORMAT_VERSION || reserved != 0 ||
+            count > FEATURE_ADVERTISE_MAX_COUNT ||
+            payloadLength != 4 + count * 4) {
+        Limelog("Ignoring malformed or unsupported feature advertisement (format %u)\n", formatVersion);
         return;
     }
 
-    resetPeerFeatures();
-
     for (i = 0; i < count; i++) {
         uint16_t id, version;
+        int j;
 
         if (!BbGet16(&bb, &id) || !BbGet16(&bb, &version)) {
-            Limelog("Feature advertisement claimed %u entries but ran out after %d\n", count, i);
-            break;
+            return;
         }
-
-        // Silently dropping the excess rather than refusing the message: a
-        // peer with more features than we can hold is not a broken peer, and
-        // the ones we did read are still true.
-        if (peerFeatureCount == FEATURE_ADVERTISE_MAX_COUNT) {
-            Limelog("Peer advertised more than %d features; ignoring the rest\n",
-                    FEATURE_ADVERTISE_MAX_COUNT);
-            break;
+        if (id == 0 || version == 0) {
+            return;
         }
-
-        peerFeatures[peerFeatureCount].id = id;
-        peerFeatures[peerFeatureCount].version = version;
-        peerFeatureCount++;
+        for (j = 0; j < i; j++) {
+            if (parsed[j].id == id) {
+                return;
+            }
+        }
+        parsed[i].id = id;
+        parsed[i].version = version;
     }
+
+    // Unknown features and unsupported versions remain disabled. This keeps
+    // a future or unrelated advertisement from partially enabling today's
+    // protocol handlers merely because its feature ID happens to be known.
+    supportedCount = 0;
+    for (i = 0; i < count; i++) {
+        unsigned int j;
+        for (j = 0; j < sizeof(localFeatures) / sizeof(localFeatures[0]); j++) {
+            if (parsed[i].id == localFeatures[j].id &&
+                    parsed[i].version == localFeatures[j].version) {
+                parsed[supportedCount++] = parsed[i];
+                break;
+            }
+        }
+    }
+
+    resetPeerFeatures();
+    memcpy(peerFeatures, parsed, supportedCount * sizeof(parsed[0]));
+    peerFeatureCount = supportedCount;
 
     Limelog("Peer advertised %u feature(s)\n", peerFeatureCount);
 }
@@ -2337,7 +2637,8 @@ int LiSendClipboardOffer(uint32_t seq, const uint16_t* formats, const uint32_t* 
     BYTE_BUFFER bb;
     uint16_t i;
 
-    if (formatCount == 0 || formatCount > CLIPBOARD_MAX_FORMATS) {
+    if (LiGetPeerFeatureVersion(ML_FEATURE_CLIPBOARD) == 0 ||
+            formatCount == 0 || formatCount > CLIPBOARD_MAX_FORMATS) {
         return -1;
     }
 
@@ -2352,12 +2653,16 @@ int LiSendClipboardOffer(uint32_t seq, const uint16_t* formats, const uint32_t* 
     }
 
     return sendMessageAndForget(packetTypes[IDX_CLIPBOARD_OFFER], (short)bb.position, payload,
-                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false) ? 0 : -1;
 }
 
 int LiSendClipboardRequest(uint32_t seq, uint16_t format) {
     char payload[8];
     BYTE_BUFFER bb;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_CLIPBOARD) == 0) {
+        return -1;
+    }
 
     BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
     BbPut32(&bb, seq);
@@ -2365,13 +2670,17 @@ int LiSendClipboardRequest(uint32_t seq, uint16_t format) {
     BbPut16(&bb, 0);
 
     return sendMessageAndForget(packetTypes[IDX_CLIPBOARD_REQUEST], (short)bb.position, payload,
-                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false) ? 0 : -1;
 }
 
 int LiSendClipboardData(uint32_t seq, uint16_t format, const void* data, uint32_t length) {
     char* payload;
     BYTE_BUFFER bb;
     int ret;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_CLIPBOARD) == 0) {
+        return -1;
+    }
 
     if (length > ML_CLIPBOARD_MAX_BYTES) {
         Limelog("Refusing to send a %u byte clipboard payload\n", length);
@@ -2397,7 +2706,7 @@ int LiSendClipboardData(uint32_t seq, uint16_t format, const void* data, uint32_
     ret = sendMessageAndForget(packetTypes[IDX_CLIPBOARD_DATA], (short)(12 + length), payload,
                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
     free(payload);
-    return ret;
+    return ret ? 0 : -1;
 }
 
 // Every length below is checked against what arrived rather than what the
@@ -2496,7 +2805,7 @@ int LiSendKeyboardLayout(const char* layout, const char* variant) {
     BYTE_BUFFER bb;
     size_t layoutLen, variantLen;
 
-    if (layout == NULL) {
+    if (LiGetPeerFeatureVersion(ML_FEATURE_KEYBOARD_LAYOUT) == 0 || layout == NULL) {
         return -1;
     }
 
@@ -2521,7 +2830,167 @@ int LiSendKeyboardLayout(const char* layout, const char* variant) {
 
     return sendMessageAndForget(packetTypes[IDX_KEYBOARD_LAYOUT],
                                 (short)(6 + layoutLen + variantLen), payload,
-                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false) ? 0 : -1;
+}
+
+// Declarative USB offer.
+//
+// Wire format, little-endian:
+//   uint8 version (1) | uint8 reserved | uint16 count | uint32 generation
+//   count x { uint16 busIdLen | uint16 hwIdLen | uint16 labelLen | uint16 reserved
+//             | busId bytes | hwId bytes | label bytes }
+//
+// The caps are protocol limits, not UI limits. They bound the allocation a
+// compromised local caller can request and are comfortably above sysfs names.
+#define USB_SYNC_MAX_DEVICES 64
+#define USB_SYNC_MAX_BUSID 32
+#define USB_SYNC_MAX_HWID 16
+#define USB_SYNC_MAX_LABEL 128
+
+int LiSendUsbDeviceSync(uint32_t generation, const ML_USB_DEVICE* devices, uint16_t deviceCount) {
+    size_t length = 8;
+    char* payload;
+    BYTE_BUFFER bb;
+    uint16_t i;
+    int ret;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_USB_PASSTHROUGH) == 0 ||
+            deviceCount > USB_SYNC_MAX_DEVICES || (deviceCount != 0 && devices == NULL)) {
+        return -1;
+    }
+
+    for (i = 0; i < deviceCount; i++) {
+        size_t busIdLen;
+        size_t hwIdLen;
+        size_t labelLen;
+
+        if (devices[i].busId == NULL) {
+            return -1;
+        }
+        busIdLen = strlen(devices[i].busId);
+        hwIdLen = devices[i].hwId != NULL ? strlen(devices[i].hwId) : 0;
+        labelLen = devices[i].label != NULL ? strlen(devices[i].label) : 0;
+        if (busIdLen == 0 || busIdLen > USB_SYNC_MAX_BUSID ||
+                hwIdLen > USB_SYNC_MAX_HWID || labelLen > USB_SYNC_MAX_LABEL) {
+            return -1;
+        }
+        length += 8 + busIdLen + hwIdLen + labelLen;
+    }
+
+    // sendMessageAndForget takes a signed short length.
+    if (length > INT16_MAX) {
+        return -1;
+    }
+
+    payload = malloc(length);
+    if (payload == NULL) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, (int)length, BYTE_ORDER_LITTLE);
+    BbPut8(&bb, 1);
+    BbPut8(&bb, 0);
+    BbPut16(&bb, deviceCount);
+    BbPut32(&bb, generation);
+
+    for (i = 0; i < deviceCount; i++) {
+        uint16_t busIdLen = (uint16_t)strlen(devices[i].busId);
+        uint16_t hwIdLen = devices[i].hwId != NULL ? (uint16_t)strlen(devices[i].hwId) : 0;
+        uint16_t labelLen = devices[i].label != NULL ? (uint16_t)strlen(devices[i].label) : 0;
+
+        BbPut16(&bb, busIdLen);
+        BbPut16(&bb, hwIdLen);
+        BbPut16(&bb, labelLen);
+        BbPut16(&bb, 0);
+        memcpy(payload + bb.position, devices[i].busId, busIdLen);
+        bb.position += busIdLen;
+        if (hwIdLen != 0) {
+            memcpy(payload + bb.position, devices[i].hwId, hwIdLen);
+            bb.position += hwIdLen;
+        }
+        if (labelLen != 0) {
+            memcpy(payload + bb.position, devices[i].label, labelLen);
+            bb.position += labelLen;
+        }
+    }
+
+    ret = sendMessageAndForget(packetTypes[IDX_USB_DEVICE_SYNC], (short)length, payload,
+                               CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false);
+    free(payload);
+    return ret ? 0 : -1;
+}
+
+#define DISPLAY_TOPOLOGY_MAX_DISPLAYS 16
+
+int LiSendDisplayTopology(uint32_t generation, const ML_DISPLAY_DESC* displays, uint16_t displayCount) {
+    char payload[8 + DISPLAY_TOPOLOGY_MAX_DISPLAYS * 32];
+    BYTE_BUFFER bb;
+    uint16_t i;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_DISPLAY_TOPOLOGY) == 0 ||
+            displayCount == 0 || displayCount > DISPLAY_TOPOLOGY_MAX_DISPLAYS || displays == NULL) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut8(&bb, 1);
+    BbPut8(&bb, 0);
+    BbPut16(&bb, displayCount);
+    BbPut32(&bb, generation);
+
+    for (i = 0; i < displayCount; i++) {
+        const ML_DISPLAY_DESC* display = &displays[i];
+        if (display->width == 0 || display->height == 0 ||
+                display->width > 16384 || display->height > 16384 ||
+                display->refreshRate < 1000 || display->refreshRate > 1000000 ||
+                display->scale < 250 || display->scale > 8000 ||
+                (display->flags & ~(ML_DISPLAY_FLAG_PRIMARY | ML_DISPLAY_FLAG_HDR)) != 0) {
+            return -1;
+        }
+        BbPut32(&bb, (uint32_t)display->x);
+        BbPut32(&bb, (uint32_t)display->y);
+        BbPut32(&bb, display->width);
+        BbPut32(&bb, display->height);
+        BbPut32(&bb, display->refreshRate);
+        BbPut32(&bb, display->scale);
+        BbPut16(&bb, display->physicalWidthMm);
+        BbPut16(&bb, display->physicalHeightMm);
+        BbPut16(&bb, display->flags);
+        BbPut16(&bb, 0);
+    }
+
+    return sendMessageAndForget(packetTypes[IDX_DISPLAY_TOPOLOGY], (short)bb.position, payload,
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false) ? 0 : -1;
+}
+
+int LiSendSystemDiskOffer(uint32_t generation, const char* targetIqn,
+                          uint64_t size, uint32_t sectorSize) {
+    char payload[20 + 223];
+    BYTE_BUFFER bb;
+    size_t iqnLength = targetIqn != NULL ? strlen(targetIqn) : 0;
+
+    if (LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) == 0 || iqnLength > 223) {
+        return -1;
+    }
+    if (iqnLength != 0 && (strncmp(targetIqn, "iqn.", 4) != 0 || size == 0 ||
+            (sectorSize != 512 && sectorSize != 4096))) {
+        return -1;
+    }
+
+    BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
+    BbPut8(&bb, 1);
+    BbPut8(&bb, iqnLength != 0 ? 1 : 0); // bit 0: kernel-enforced read-only
+    BbPut16(&bb, (uint16_t)iqnLength);
+    BbPut32(&bb, generation);
+    BbPut64(&bb, iqnLength != 0 ? size : 0);
+    BbPut32(&bb, iqnLength != 0 ? sectorSize : 0);
+    if (iqnLength != 0) {
+        memcpy(payload + bb.position, targetIqn, iqnLength);
+        bb.position += (int)iqnLength;
+    }
+
+    return sendMessageAndForget(packetTypes[IDX_SYSTEM_DISK_OFFER], (short)bb.position, payload,
+                                CTRL_CHANNEL_FEATURE, ENET_PACKET_FLAG_RELIABLE, false) ? 0 : -1;
 }
 
 // Send a server cmd request to the streaming machine
