@@ -157,6 +157,7 @@ static PPLT_CRYPTO_CONTEXT decryptionCtx;
 #define IDX_DISK_TUNNEL_OPEN 27
 #define IDX_DISK_TUNNEL_DATA 28
 #define IDX_DISK_TUNNEL_CLOSE 29
+#define IDX_SYSTEM_DISK_STATUS 30
 
 #define CONTROL_STREAM_TIMEOUT_SEC 10
 #define CONTROL_STREAM_LINGER_TIMEOUT_SEC 2
@@ -192,6 +193,7 @@ static const short packetTypesGen3[] = {
     -1,     // Disk tunnel open (unused)
     -1,     // Disk tunnel data (unused)
     -1,     // Disk tunnel close (unused)
+    -1,     // System disk status (unused)
 };
 static const short packetTypesGen4[] = {
     0x0606, // Request IDR frame
@@ -224,6 +226,7 @@ static const short packetTypesGen4[] = {
     -1,     // Disk tunnel open (unused)
     -1,     // Disk tunnel data (unused)
     -1,     // Disk tunnel close (unused)
+    -1,     // System disk status (unused)
 };
 static const short packetTypesGen5[] = {
     0x0305, // Start A
@@ -256,6 +259,7 @@ static const short packetTypesGen5[] = {
     -1,     // Disk tunnel open (unused)
     -1,     // Disk tunnel data (unused)
     -1,     // Disk tunnel close (unused)
+    -1,     // System disk status (unused)
 };
 static const short packetTypesGen7[] = {
     0x0305, // Start A
@@ -288,6 +292,7 @@ static const short packetTypesGen7[] = {
     -1,     // Disk tunnel open (unused)
     -1,     // Disk tunnel data (unused)
     -1,     // Disk tunnel close (unused)
+    -1,     // System disk status (unused)
 };
 static const short packetTypesGen7Enc[] = {
     0x0302, // Request IDR frame
@@ -320,6 +325,7 @@ static const short packetTypesGen7Enc[] = {
     0x600b, // Disk tunnel open (Moonlight OS protocol extension)
     0x600c, // Disk tunnel data (Moonlight OS protocol extension)
     0x600d, // Disk tunnel close (Moonlight OS protocol extension)
+    0x600e, // System disk status (Moonlight OS protocol extension)
 };
 
 static const char requestIdrFrameGen3[] = { 0, 0 };
@@ -409,6 +415,7 @@ static void handleUsbTunnelClose(char* payload, int payloadLength);
 static void handleDiskTunnelOpen(char* payload, int payloadLength);
 static void handleDiskTunnelData(char* payload, int payloadLength);
 static void handleDiskTunnelClose(char* payload, int payloadLength);
+static void handleSystemDiskStatus(char* payload, int payloadLength);
 static short* payloadLengths;
 static char**preconstructedPayloads;
 static bool supportsIdrFrameRequest;
@@ -1477,6 +1484,10 @@ static void controlReceiveThreadFunc(void* context) {
                     LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) != 0) {
                 handleDiskTunnelClose((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
             }
+            else if (ctlHdr->type == packetTypes[IDX_SYSTEM_DISK_STATUS] &&
+                    LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) >= 2) {
+                handleSystemDiskStatus((char*)(ctlHdr + 1), packetLength - sizeof(*ctlHdr));
+            }
             else if (ctlHdr->type == packetTypes[IDX_TERMINATION]) {
                 BYTE_BUFFER bb;
 
@@ -2453,6 +2464,24 @@ static void handleDiskTunnelClose(char* payload, int payloadLength) {
     }
 }
 
+static void handleSystemDiskStatus(char* payload, int payloadLength) {
+    BYTE_BUFFER bb;
+    uint8_t state, reserved;
+    uint16_t messageLength;
+    uint32_t generation;
+    BbInitializeWrappedBuffer(&bb, payload, 0, payloadLength, BYTE_ORDER_LITTLE);
+    if (payloadLength < 8 || !BbGet8(&bb, &state) || !BbGet8(&bb, &reserved) ||
+            !BbGet16(&bb, &messageLength) || !BbGet32(&bb, &generation) ||
+            reserved != 0 || state > ML_SYSTEM_DISK_STATUS_DETACHING ||
+            messageLength > 512 || payloadLength != 8 + messageLength) {
+        Limelog("Malformed system disk status\n");
+        return;
+    }
+    if (ListenerCallbacks.systemDiskStatus != NULL) {
+        ListenerCallbacks.systemDiskStatus(generation, state, payload + 8, messageLength);
+    }
+}
+
 // Send a server cmd request to the streaming machine
 int LiSendExecServerCmd(uint8_t cmdId) {
     uint8_t payload[4] = {cmdId, 0, 0, 0};
@@ -2502,7 +2531,7 @@ static const FEATURE_ENTRY localFeatures[] = {
     { ML_FEATURE_MICROPHONE, 1 },
     { ML_FEATURE_CAMERA, 1 },
     { ML_FEATURE_DISPLAY_TOPOLOGY, 1 },
-    { ML_FEATURE_SYSTEM_DISK, 1 },
+    { ML_FEATURE_SYSTEM_DISK, 2 },
 };
 
 uint16_t LiGetPeerFeatureVersion(uint16_t featureId) {
@@ -2964,29 +2993,53 @@ int LiSendDisplayTopology(uint32_t generation, const ML_DISPLAY_DESC* displays, 
 }
 
 int LiSendSystemDiskOffer(uint32_t generation, const char* targetIqn,
-                          uint64_t size, uint32_t sectorSize) {
-    char payload[20 + 223];
+                          uint64_t size, uint32_t sectorSize,
+                          const char* chapUsername, const char* chapPassword) {
+    char payload[24 + 223 + 64 + 64];
     BYTE_BUFFER bb;
     size_t iqnLength = targetIqn != NULL ? strlen(targetIqn) : 0;
+    size_t usernameLength = chapUsername != NULL ? strlen(chapUsername) : 0;
+    size_t passwordLength = chapPassword != NULL ? strlen(chapPassword) : 0;
+    size_t i;
 
-    if (LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) == 0 || iqnLength > 223) {
+    if (LiGetPeerFeatureVersion(ML_FEATURE_SYSTEM_DISK) < 2 || iqnLength > 223 ||
+            usernameLength > 64 || passwordLength > 64) {
         return -1;
     }
     if (iqnLength != 0 && (strncmp(targetIqn, "iqn.", 4) != 0 || size == 0 ||
-            (sectorSize != 512 && sectorSize != 4096))) {
+            (sectorSize != 512 && sectorSize != 4096) || usernameLength < 12 ||
+            passwordLength < 12)) {
         return -1;
+    }
+    if (iqnLength == 0 && (usernameLength != 0 || passwordLength != 0)) return -1;
+    for (i = 0; i < usernameLength; i++) {
+        char ch = chapUsername[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                (ch >= '0' && ch <= '9'))) return -1;
+    }
+    for (i = 0; i < passwordLength; i++) {
+        char ch = chapPassword[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                (ch >= '0' && ch <= '9'))) return -1;
     }
 
     BbInitializeWrappedBuffer(&bb, payload, 0, sizeof(payload), BYTE_ORDER_LITTLE);
-    BbPut8(&bb, 1);
-    BbPut8(&bb, iqnLength != 0 ? 1 : 0); // bit 0: kernel-enforced read-only
+    BbPut8(&bb, 2);
+    BbPut8(&bb, iqnLength != 0 ? 0x07 : 0); // read-only, stable snapshot, CHAP
     BbPut16(&bb, (uint16_t)iqnLength);
     BbPut32(&bb, generation);
     BbPut64(&bb, iqnLength != 0 ? size : 0);
     BbPut32(&bb, iqnLength != 0 ? sectorSize : 0);
+    BbPut8(&bb, (uint8_t)usernameLength);
+    BbPut8(&bb, (uint8_t)passwordLength);
+    BbPut16(&bb, 0);
     if (iqnLength != 0) {
         memcpy(payload + bb.position, targetIqn, iqnLength);
         bb.position += (int)iqnLength;
+        memcpy(payload + bb.position, chapUsername, usernameLength);
+        bb.position += (int)usernameLength;
+        memcpy(payload + bb.position, chapPassword, passwordLength);
+        bb.position += (int)passwordLength;
     }
 
     return sendMessageAndForget(packetTypes[IDX_SYSTEM_DISK_OFFER], (short)bb.position, payload,

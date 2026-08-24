@@ -514,6 +514,8 @@ typedef void(*ConnListenerUsbTunnelClose)(uint32_t tunnelId, uint16_t reason);
 typedef void(*ConnListenerDiskTunnelOpen)(uint32_t tunnelId);
 typedef void(*ConnListenerDiskTunnelData)(uint32_t tunnelId, const void* data, uint16_t length);
 typedef void(*ConnListenerDiskTunnelClose)(uint32_t tunnelId, uint16_t reason);
+typedef void(*ConnListenerSystemDiskStatus)(uint32_t generation, uint8_t state,
+                                            const char* message, uint16_t messageLength);
 
 typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerStageStarting stageStarting;
@@ -538,6 +540,7 @@ typedef struct _CONNECTION_LISTENER_CALLBACKS {
     ConnListenerDiskTunnelOpen diskTunnelOpen;
     ConnListenerDiskTunnelData diskTunnelData;
     ConnListenerDiskTunnelClose diskTunnelClose;
+    ConnListenerSystemDiskStatus systemDiskStatus;
 } CONNECTION_LISTENER_CALLBACKS, *PCONNECTION_LISTENER_CALLBACKS;
 
 // Use this function to zero the connection callbacks when allocated on the stack or heap
@@ -755,7 +758,16 @@ int LiSendDisplayTopology(uint32_t generation, const ML_DISPLAY_DESC* displays, 
 // is reachable only through the matching disk tunnel; no LAN portal is
 // exposed. An empty IQN withdraws the current offer.
 int LiSendSystemDiskOffer(uint32_t generation, const char* targetIqn,
-                          uint64_t size, uint32_t sectorSize);
+                          uint64_t size, uint32_t sectorSize,
+                          const char* chapUsername, const char* chapPassword);
+
+// Host attachment lifecycle states delivered through systemDiskStatus. The
+// message is UTF-8 and may contain an actionable failure description.
+#define ML_SYSTEM_DISK_STATUS_DETACHED  0
+#define ML_SYSTEM_DISK_STATUS_ATTACHING 1
+#define ML_SYSTEM_DISK_STATUS_ATTACHED  2
+#define ML_SYSTEM_DISK_STATUS_FAILED    3
+#define ML_SYSTEM_DISK_STATUS_DETACHING 4
 
 #define ML_USB_TUNNEL_MAX_CHUNK 16384
 #define ML_USB_TUNNEL_CLOSE_NORMAL 0
